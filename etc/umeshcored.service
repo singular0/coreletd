@@ -1,0 +1,43 @@
+[Unit]
+Description=umeshcore MeshCore daemon (uConsole + AIO v2)
+Documentation=https://github.com/meshcore-dev/MeshCore
+After=network.target
+# The radio is useless without SPI; if the overlay did not load, fail loudly.
+ConditionPathExists=/dev/spidev1.0
+
+[Service]
+Type=exec
+ExecStart=/usr/sbin/umeshcored --config /etc/umeshcore/umeshcored.ini --syslog
+Restart=on-failure
+RestartSec=5
+
+User=umeshcore
+Group=meshcore
+
+# systemd creates and owns this before start, so it need not be pre-made.
+StateDirectory=umeshcore
+StateDirectoryMode=0750
+Environment=HOME=/var/lib/umeshcore
+
+# The daemon needs nothing beyond its own state, SPI and GPIO.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=no
+DeviceAllow=/dev/spidev1.0 rw
+DeviceAllow=char-gpiochip rw
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

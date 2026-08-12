@@ -1,0 +1,32 @@
+Source: umeshcore
+Section: comm
+Priority: optional
+Maintainer: Denis Yantarev <denis.yantarev@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               cmake (>= 3.16),
+               pkgconf,
+               libsodium-dev,
+               libssl-dev,
+               libgpiod-dev (>= 2.0)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: umeshcore
+Architecture: linux-any
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         adduser
+Description: MeshCore daemon for the ClockworkPi uConsole with AIO v2
+ umeshcored drives the SX1262 LoRa transceiver on the HackerGadgets /
+ OpenSourceSDRLab AIO v2 expansion board directly over spidev and libgpiod,
+ speaks the MeshCore mesh protocol, and exposes the companion protocol over
+ TCP so the MeshCore phone/web app, meshcore-cli and meshtui can connect --
+ including from the uConsole itself over loopback.
+ .
+ It handles adverts and contacts, encrypted direct messages with acks,
+ retries and path learning, and channel (group) messages. Repeater and room
+ server roles are out of scope, and TCP is the only companion transport.
+ .
+ This is a clean-room C++20 implementation, not affiliated with MeshCore
+ upstream. It needs a frequency configured for your region and an antenna
+ fitted before it will transmit, so the service is not enabled on install.

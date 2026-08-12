@@ -1,0 +1,43 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # `meshcore` is the group the udev rules hand /dev/spidev1.0 and the
+        # GPIO chardevs to. It exists separately from the daemon's own user so
+        # an admin can join it and run umeshcored --verbose by hand.
+        if ! getent group meshcore >/dev/null; then
+            addgroup --system meshcore
+        fi
+
+        # Home is /var/lib/umeshcore, but systemd's StateDirectory= creates and
+        # owns it at first start -- do not pre-create it here, so that a purge
+        # never has to reason about who owns the node identity inside it.
+        if ! getent passwd umeshcore >/dev/null; then
+            adduser --system --ingroup meshcore \
+                    --home /var/lib/umeshcore --no-create-home \
+                    --gecos "umeshcore MeshCore daemon" \
+                    umeshcore
+        fi
+
+        # udevd notices the new rules file on its own, but devices that already
+        # exist keep their old ownership until they are re-triggered.
+        if [ -d /run/udev ] && command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules >/dev/null 2>&1 || true
+            udevadm trigger --subsystem-match=spidev \
+                            --subsystem-match=gpio >/dev/null 2>&1 || true
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

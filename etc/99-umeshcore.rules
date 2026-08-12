@@ -1,0 +1,13 @@
+# Grant the `meshcore` group access to the SPI bus and GPIO character devices,
+# so umeshcored can drive the SX1262 without running as root.
+#
+# Install:
+#   sudo groupadd -f -r meshcore
+#   sudo install -m 644 99-umeshcore.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Verify:  ls -l /dev/spidev1.0 /dev/gpiochip0   ->  crw-rw---- root meshcore
+
+SUBSYSTEM=="spidev", GROUP="meshcore", MODE="0660"
+SUBSYSTEM=="gpio", GROUP="meshcore", MODE="0660"
+KERNEL=="gpiochip[0-9]*", GROUP="meshcore", MODE="0660"

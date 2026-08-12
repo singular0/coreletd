@@ -1,0 +1,96 @@
+.TH UMESHCORED 8 "2026-08-12" "umeshcore 0.1.0" "System Manager's Manual"
+.SH NAME
+umeshcored \- MeshCore daemon for the ClockworkPi uConsole with AIO v2
+.SH SYNOPSIS
+.B umeshcored
+.RI [ options ]
+.SH DESCRIPTION
+.B umeshcored
+drives the SX1262 LoRa transceiver on the HackerGadgets / OpenSourceSDRLab
+AIO v2 expansion board over
+.BR spidev (4)
+and libgpiod, speaks the MeshCore mesh protocol, and exposes the MeshCore
+companion protocol over TCP so that the phone or web app,
+.BR meshcore-cli (1)
+and meshtui can connect \(em including from the uConsole itself over loopback.
+.PP
+It sends and receives adverts, maintains a contact store, carries encrypted
+direct messages with acknowledgements, retries and path learning, and relays
+channel (group) messages. Repeater and room server roles are not implemented,
+and TCP is the only companion transport.
+.PP
+Everything runs on a single thread in one
+.BR poll (2)
+loop.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-config " " \fIPATH\fR
+Read configuration from \fIPATH\fR instead of
+.IR /etc/umeshcore/umeshcored.ini .
+.TP
+.BR \-v ", " \-\-verbose
+Raise the log level to debug, overriding the configuration file. Repeat for
+trace, which reports every SPI command and IRQ.
+.TP
+.BR \-s ", " \-\-syslog
+Omit timestamps from log lines, for running under systemd, which adds its own.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.SH CONFIGURATION
+.B lora_freq
+is required and has no default: which band you may transmit on is a legal
+question, not a technical one. The daemon refuses to start without it. Every
+node on a mesh must agree on
+.BR lora_bw ,
+.B lora_sf
+and
+.BR lora_cr .
+The installed configuration file documents every option.
+.PP
+The AIO v2 gates power to each subsystem behind a GPIO;
+.B lora_power_enable_pin
+(16) must be driven high or the SX1262 is unpowered and every SPI read returns
+zeroes. The daemon does this at startup.
+.SH FILES
+.TP
+.I /etc/umeshcore/umeshcored.ini
+Configuration file.
+.TP
+.I /var/lib/umeshcore/identity
+The node's Ed25519 signing key, generated on first start, mode 0600. This file
+.I is
+the node: back it up. Deleting it yields a new public key, and every contact
+will see the node as a stranger.
+.TP
+.I /var/lib/umeshcore/contacts
+.TQ
+.I /var/lib/umeshcore/channels
+Learned contacts and configured channels.
+.TP
+.I /usr/lib/udev/rules.d/99\-umeshcore.rules
+Grants the
+.B meshcore
+group access to the SPI bus and the GPIO character devices, so the daemon need
+not run as root.
+.SH SECURITY
+The companion protocol has no authentication whatsoever. Anyone who can reach
+the port can read messages and send as this node, so
+.B companion_bind
+defaults to 127.0.0.1. Widen it only on a trusted network, ideally behind an
+SSH tunnel or WireGuard.
+.SH EXIT STATUS
+Returns 0 on a clean shutdown after SIGINT or SIGTERM, 1 if the configuration
+cannot be loaded or the radio cannot be brought up, and 2 for a usage error.
+.SH SEE ALSO
+.BR systemctl (1),
+.BR journalctl (1),
+.BR spidev (4)
+.PP
+/usr/share/doc/umeshcore/README.Debian for uConsole setup, including the
+device tree overlay the radio needs.
+.SH AUTHOR
+Denis Yantarev <denis.yantarev@gmail.com>

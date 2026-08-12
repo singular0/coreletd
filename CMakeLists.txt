@@ -61,6 +61,7 @@ add_library(umeshcore_core STATIC
     src/crypto/identity.cpp
     src/proto/packet.cpp
     src/proto/payloads.cpp
+    src/radio/radio.cpp
     src/radio/mock_radio.cpp
     src/mesh/contacts.cpp
     src/mesh/channels.cpp

@@ -74,6 +74,7 @@ add_library(umeshcore_core STATIC
     src/companion/session.cpp
     src/daemon/config.cpp
     src/daemon/eventloop.cpp
+    src/daemon/host_metrics.cpp
     src/daemon/app.cpp
 )
 

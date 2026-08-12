@@ -118,9 +118,16 @@ bool App::start() {
         return false;
     }
 
-    companion::Session::DeviceInfo info;
+    companion::DeviceMetrics::Info info;
+    info.model = "uConsole AIO v2";
+    info.firmware_build = UMESHCORE_VERSION;
+    info.version = UMESHCORE_VERSION;
+    info.max_contacts_div2 = mesh::ContactStore::kMaxContacts / 2;
+    info.max_channels = mesh::ChannelStore::kMaxChannels;
+    metrics_ = std::make_unique<HostMetrics>(std::move(info), cfg_.state_dir);
+
     session_ = std::make_unique<companion::Session>(*server_, *node_, *contacts_, *channels_,
-                                                    *radio_, *state_, std::move(info));
+                                                    *radio_, *state_, *metrics_);
     session_->attach();
 
     log_status();

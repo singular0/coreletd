@@ -8,6 +8,7 @@
 #include "companion/session.h"
 #include "daemon/config.h"
 #include "daemon/eventloop.h"
+#include "daemon/host_metrics.h"
 #include "mesh/channels.h"
 #include "mesh/contacts.h"
 #include "mesh/dispatcher.h"
@@ -50,6 +51,7 @@ private:
     std::unique_ptr<mesh::Dispatcher> dispatcher_;
     std::unique_ptr<mesh::Node> node_;
     std::unique_ptr<mesh::StateWriter> state_;
+    std::unique_ptr<HostMetrics> metrics_;
     std::unique_ptr<companion::Server> server_;
     std::unique_ptr<companion::Session> session_;
 };

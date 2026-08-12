@@ -1,8 +1,7 @@
 #include "companion/session.h"
 
 #include <algorithm>
-#include <filesystem>
-#include <fstream>
+#include <cstdint>
 
 #include "util/clock.h"
 #include "util/hex.h"
@@ -12,22 +11,10 @@ namespace umc::companion {
 
 namespace {
 
-// Best-effort battery reading. The uConsole exposes its pack through the
-// standard power-supply class; anything else reports 0, which the app renders
-// as "unknown" rather than as a flat battery.
-uint16_t read_battery_mv() {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    for (const auto& entry : fs::directory_iterator("/sys/class/power_supply", ec)) {
-        std::ifstream type_file(entry.path() / "type");
-        std::string type;
-        if (!(type_file >> type) || type != "Battery") continue;
-
-        std::ifstream volt(entry.path() / "voltage_now");
-        long uv = 0;
-        if (volt >> uv && uv > 0) return static_cast<uint16_t>(std::min(uv / 1000, 65535L));
-    }
-    return 0;
+// The wire figures are kilobytes, so anything under 1 kB reports as 0 rather
+// than rounding a nearly-full disk up to something reassuring.
+uint32_t to_kb(uint64_t bytes) {
+    return static_cast<uint32_t>(std::min<uint64_t>(bytes / 1024, UINT32_MAX));
 }
 
 // The three ways a send can fail are three different things for the user to do
@@ -56,14 +43,14 @@ void put_padded(Bytes& out, ByteView data, size_t width) {
 
 Session::Session(Server& server, mesh::Node& node, mesh::ContactStore& contacts,
                  mesh::ChannelStore& channels, radio::Radio& radio, mesh::StateWriter& state,
-                 DeviceInfo info)
+                 const DeviceMetrics& metrics)
     : server_(server),
       node_(node),
       contacts_(contacts),
       channels_(channels),
       radio_(radio),
       state_(state),
-      info_(std::move(info)) {}
+      metrics_(metrics) {}
 
 void Session::attach() {
     server_.set_frame_handler([this](ByteView f) { handle_frame(f); });
@@ -195,13 +182,14 @@ Bytes Session::self_info_frame() const {
 }
 
 Bytes Session::cmd_device_query(ByteView args) {
+    const auto& info = metrics_.info();
     Bytes out {kRespDeviceInfo, kFirmwareVersion};
-    out.push_back(info_.max_contacts_div2);
-    out.push_back(info_.max_channels);
+    out.push_back(info.max_contacts_div2);
+    out.push_back(info.max_channels);
     put_u32(out, 0);  // BLE pin, not applicable over TCP
-    put_padded(out, to_bytes(info_.firmware_build), 12);
-    put_padded(out, to_bytes(info_.model), 40);
-    put_padded(out, to_bytes(info_.version), 20);
+    put_padded(out, to_bytes(info.firmware_build), 12);
+    put_padded(out, to_bytes(info.model), 40);
+    put_padded(out, to_bytes(info.version), 20);
     return out;
 }
 
@@ -470,11 +458,12 @@ Bytes Session::cmd_set_advert_latlon(ByteView args) {
 }
 
 Bytes Session::cmd_get_battery(ByteView args) {
+    auto storage = metrics_.storage();
+
     Bytes out {kRespBatteryVoltage};
-    put_u16(out, read_battery_mv());
-    // Storage figures: report the contacts/channels store as "used".
-    put_u32(out, 0);
-    put_u32(out, 0);
+    put_u16(out, metrics_.battery_mv());
+    put_u32(out, to_kb(storage.used_bytes));
+    put_u32(out, to_kb(storage.total_bytes));
     return out;
 }
 

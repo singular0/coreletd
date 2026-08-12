@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "companion/device_metrics.h"
 #include "companion/server.h"
 #include "mesh/node.h"
 #include "mesh/state_writer.h"
@@ -13,17 +14,9 @@ namespace umc::companion {
 // pushes mesh events back to the app.
 class Session : public mesh::Node::Delegate {
 public:
-    struct DeviceInfo {
-        std::string model = "uConsole AIO v2";
-        std::string firmware_build = UMESHCORE_VERSION;
-        std::string version = UMESHCORE_VERSION;
-        uint8_t max_contacts_div2 = mesh::ContactStore::kMaxContacts / 2;
-        uint8_t max_channels = mesh::ChannelStore::kMaxChannels;
-    };
-
     Session(Server& server, mesh::Node& node, mesh::ContactStore& contacts,
             mesh::ChannelStore& channels, radio::Radio& radio, mesh::StateWriter& state,
-            DeviceInfo info);
+            const DeviceMetrics& metrics);
 
     void attach();
 
@@ -72,7 +65,7 @@ private:
     mesh::ChannelStore& channels_;
     radio::Radio& radio_;
     mesh::StateWriter& state_;
-    DeviceInfo info_;
+    const DeviceMetrics& metrics_;
 
     // Set once the app has sent CMD_APP_START. Commands before that are still
     // answered — some clients probe with DEVICE_QUERY first.

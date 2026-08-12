@@ -1,5 +1,6 @@
 #include "companion/frames.h"
 #include "companion/server.h"
+#include "daemon/host_metrics.h"
 #include "tests/test_util.h"
 
 using namespace umc;
@@ -130,6 +131,35 @@ static void test_outbound_buffer_limit_is_overflow_safe() {
     CHECK(!outbound_buffer_has_capacity(size_t(-2), 4, size_t(-1)));
 }
 
+// Both figures the app shows come from one statvfs, and the reply carries them
+// as a pair: a total smaller than the used part, or a used part that swallowed
+// the reserved blocks into a negative, would render as nonsense.
+static void test_host_metrics_storage_is_coherent() {
+    umc::HostMetrics::Info info;
+    info.model = "test";
+    umc::HostMetrics metrics(info, "/tmp");
+
+    auto s = metrics.storage();
+    CHECK(s.total_bytes > 0);
+    CHECK(s.used_bytes <= s.total_bytes);
+
+    // No battery on a dev machine, and none on any host where the sysfs walk
+    // found nothing: 0 is the protocol's "unknown", not a flat pack.
+    CHECK(metrics.battery_mv() == 0 || metrics.battery_mv() > 1000);
+
+    // The identity half is passed through untouched.
+    CHECK(metrics.info().model == "test");
+}
+
+// An unreadable state directory must report zeros rather than whatever an
+// uninitialised statvfs left on the stack.
+static void test_host_metrics_storage_survives_a_bad_path() {
+    umc::HostMetrics metrics(umc::HostMetrics::Info {}, "/nonexistent/umeshcore/state");
+    auto s = metrics.storage();
+    CHECK_EQ(s.used_bytes, uint64_t {0});
+    CHECK_EQ(s.total_bytes, uint64_t {0});
+}
+
 int main() {
     test_single_frame();
     test_split_across_reads();
@@ -140,5 +170,7 @@ int main() {
     test_response_framing();
     test_response_helpers();
     test_outbound_buffer_limit_is_overflow_safe();
+    test_host_metrics_storage_is_coherent();
+    test_host_metrics_storage_survives_a_bad_path();
     return finish("companion");
 }

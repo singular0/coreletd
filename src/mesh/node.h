@@ -91,6 +91,26 @@ public:
     const DispatcherStats& stats() const { return dispatcher_.stats(); }
 
 private:
+    struct Pending {
+        // Local operation identity. ACK hashes are deliberately short wire
+        // identifiers and can collide, so callbacks and timers must never use
+        // them to choose which operation to advance. 0 marks a send with no
+        // retry state (CLI data), which is never registered in pending_.
+        uint64_t id = 0;
+        // The first hash is what the companion client was told to wait for.
+        // Retries change the attempt bits in the plaintext and therefore have
+        // different on-air ack hashes; keep all transmitted hashes so a late
+        // or bundled ack for any attempt can complete the original send.
+        Bytes ack_hash;
+        std::vector<Bytes> accepted_ack_hashes;
+        Bytes dest_pubkey;
+        std::string text;
+        uint8_t txt_type = proto::kTxtPlain;
+        uint32_t timestamp = 0;
+        uint8_t attempt = 0;
+        EventLoop::TimerId timer = 0;
+    };
+
     void on_packet(proto::Packet&& p);
 
     void handle_advert(const proto::Packet& p);
@@ -111,28 +131,15 @@ private:
     void on_retry(uint64_t pending_id);
     void on_tx_result(uint64_t pending_id, bool transmitted);
 
+    // Builds and transmits one attempt of a pending message — the initial send
+    // is attempt 0, retries are 1..kMaxAttempts-1. `force_flood` ignores a known
+    // path, which the last attempt uses. Returns the on-air ack hash of this
+    // attempt, or nullopt if the message could not be sealed or queued.
+    std::optional<Bytes> send_attempt(Pending& pending, const Contact& to, bool force_flood);
+
     proto::AdvertAppData build_appdata() const;
     bool route_packet(proto::Packet& p, const Contact& to, uint8_t priority,
-                      Dispatcher::TxResultHandler on_result = {});
-
-    struct Pending {
-        // Local operation identity. ACK hashes are deliberately short wire
-        // identifiers and can collide, so callbacks and timers must never use
-        // them to choose which operation to advance.
-        uint64_t id = 0;
-        // The first hash is what the companion client was told to wait for.
-        // Retries change the attempt bits in the plaintext and therefore have
-        // different on-air ack hashes; keep all transmitted hashes so a late
-        // or bundled ack for any attempt can complete the original send.
-        Bytes ack_hash;
-        std::vector<Bytes> accepted_ack_hashes;
-        Bytes dest_pubkey;
-        std::string text;
-        uint8_t txt_type = proto::kTxtPlain;
-        uint32_t timestamp = 0;
-        uint8_t attempt = 0;
-        EventLoop::TimerId timer = 0;
-    };
+                      bool force_flood = false, Dispatcher::TxResultHandler on_result = {});
 
     EventLoop& loop_;
     Dispatcher& dispatcher_;

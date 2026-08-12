@@ -18,10 +18,11 @@ namespace pv = umc::pktvec;
 class GatedRadio final : public radio::Radio {
 public:
     bool begin(EventLoop&, std::string&) override { return true; }
-    bool send(ByteView) override {
+    bool send(ByteView data) override {
         if (!ready_ || busy_) return false;
         busy_ = true;
         send_count_++;
+        last_sent_.assign(data.begin(), data.end());
         return true;
     }
     bool tx_busy() const override { return busy_; }
@@ -35,12 +36,14 @@ public:
         deliver_tx_done(airtime_ms);
     }
     size_t send_count() const { return send_count_; }
+    const Bytes& last_sent() const { return last_sent_; }
 
 private:
     radio::RadioParams params_;
     bool ready_ = false;
     bool busy_ = false;
     size_t send_count_ = 0;
+    Bytes last_sent_;
 };
 
 static void test_public_channel() {
@@ -503,6 +506,72 @@ static void test_pending_send_limit_rejects_new_message() {
     CHECK_EQ(dispatcher.queue_depth(), size_t {1});
 }
 
+// A retry is the same send with a higher attempt number, so it has to be built
+// by the same code: routed through the contact's path, with a path hash size the
+// receiver can parse, and carrying the attempt counter on the wire.
+static void test_retry_routes_like_the_first_send() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore contacts(*self);
+    Contact& peer = *contacts.upsert(from_hex(pv::kPubB));
+    const Bytes path = {0xAA, 0xBB};
+    contacts.set_path(peer, path);
+
+    ChannelStore channels;
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio, 1);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
+
+    // Keep the radio busy so the message is queued rather than sent at once.
+    radio.set_ready(true);
+    proto::Packet filler;
+    filler.type = proto::PayloadType::Ack;
+    filler.payload = {1, 2, 3, 4};
+    CHECK(dispatcher.send(filler, kPriorityAck));
+    CHECK_EQ(radio.send_count(), size_t {1});
+
+    CHECK(node.send_text(peer, "retry me", proto::kTxtPlain, pv::kFixedTime).has_value());
+    CHECK_EQ(dispatcher.queue_depth(), size_t {1});
+    radio.complete_tx();
+
+    // More urgent traffic displaces it from the one-slot queue. Reporting the
+    // send as never transmitted is what schedules the retry.
+    proto::Packet urgent = filler;
+    urgent.payload[0] = 5;
+    CHECK(dispatcher.send(std::move(urgent), kPriorityAck));
+    CHECK_EQ(dispatcher.stats().tx_dropped, uint32_t {1});
+    radio.complete_tx();
+
+    loop.add_timer(5, [&loop] { loop.stop(); });
+    loop.run();
+
+    CHECK_EQ(radio.send_count(), size_t {3});
+    auto sent = proto::Packet::decode(radio.last_sent());
+    CHECK(sent.has_value());
+    if (!sent) return;
+
+    CHECK(sent->is_direct());
+    CHECK_EQ(sent->path_hash_size, uint8_t {1});
+    CHECK_BYTES(sent->path, path);
+
+    auto env = proto::DirectEnvelope::decode(sent->payload);
+    CHECK(env.has_value());
+    if (!env) return;
+    auto plain = crypto::mac_and_decrypt(peer.shared_secret(*self), env->mac, env->ciphertext);
+    CHECK(plain.has_value());
+    if (!plain) return;
+    auto msg = proto::TextMessage::decode(*plain);
+    CHECK(msg.has_value());
+    if (!msg) return;
+    CHECK_EQ(msg->attempt, uint8_t {1});
+    CHECK(msg->body() == "retry me");
+}
+
 static void test_contact_references_survive_insertion() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
@@ -627,6 +696,7 @@ int main() {
     test_earlier_pump_replaces_later_timer();
     test_dispatch_queue_drops_lowest_priority();
     test_pending_send_limit_rejects_new_message();
+    test_retry_routes_like_the_first_send();
     test_contact_references_survive_insertion();
     test_received_message_marks_store_dirty();
     test_direct_ack_marks_store_dirty();

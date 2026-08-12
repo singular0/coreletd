@@ -78,9 +78,9 @@ void Node::send_advert(bool flood) {
     dispatcher_.send(std::move(*p), kPriorityAdvert);
 }
 
-bool Node::route_packet(proto::Packet& p, const Contact& to, uint8_t priority,
+bool Node::route_packet(proto::Packet& p, const Contact& to, uint8_t priority, bool force_flood,
                         Dispatcher::TxResultHandler on_result) {
-    if (to.path_known) {
+    if (to.path_known && !force_flood) {
         p.route = proto::RouteType::Direct;
         p.path = to.out_path;
         p.path_hash_size = 1;
@@ -91,8 +91,7 @@ bool Node::route_packet(proto::Packet& p, const Contact& to, uint8_t priority,
     return dispatcher_.send(std::move(p), priority, 0, std::move(on_result));
 }
 
-std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8_t txt_type,
-                                     uint32_t timestamp) {
+std::optional<Bytes> Node::send_attempt(Pending& pending, const Contact& to, bool force_flood) {
     const Bytes& shared = to.shared_secret(self_);
     if (shared.empty()) {
         LOG_ERROR("send: no shared secret for %s", hex_prefix(to.pubkey).c_str());
@@ -100,21 +99,67 @@ std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8
     }
 
     proto::TextMessage msg;
-    msg.timestamp = timestamp;
-    msg.txt_type = txt_type;
-    msg.attempt = 0;
-    msg.text = to_bytes(text);
+    msg.timestamp = pending.timestamp;
+    msg.txt_type = pending.txt_type;
+    // The attempt counter goes on the wire so the receiver can tell a retry
+    // from a genuine duplicate message.
+    msg.attempt = pending.attempt;
+    msg.text = to_bytes(pending.text);
 
     Bytes plaintext = msg.encode();
     // Plain messages are acked against the sender's key; signed/room messages
     // against the recipient's.
-    ByteView ack_key = txt_type == proto::kTxtSignedPlain ? ByteView(to.pubkey) : self_.pub();
+    ByteView ack_key =
+        pending.txt_type == proto::kTxtSignedPlain ? ByteView(to.pubkey) : self_.pub();
     Bytes ack_hash = proto::message_ack_hash(plaintext, ack_key);
 
-    // Exact duplicate sends are one logical delivery. Sending the same wire
-    // packet twice would be suppressed by receivers' deduplication anyway, so
-    // coalesce it with the operation already waiting for this ACK.
-    if (txt_type != proto::kTxtCliData) {
+    // Every attempt is acceptable in reply; the first one is the operation's
+    // identity, and what the caller was told to wait for.
+    if (pending.attempt == 0) pending.ack_hash = ack_hash;
+    pending.accepted_ack_hashes.push_back(ack_hash);
+
+    auto env = proto::DirectEnvelope::seal(to.id(), self_.pub()[0], shared, plaintext);
+    proto::Packet p;
+    p.type = proto::PayloadType::TxtMsg;
+    p.payload = env.encode();
+
+    const bool flood = force_flood || !to.path_known;
+    LOG_DEBUG("send: attempt %u for %s via %s", pending.attempt + 1,
+              hex(pending.ack_hash).c_str(), flood ? "flood" : "path");
+
+    // Everything below works from copies: an idle radio accepts the packet
+    // synchronously, so the transmission callback — and any node code it
+    // reaches — can run before route_packet() returns.
+    const Bytes op_hash = pending.ack_hash;
+    const size_t text_size = pending.text.size();
+    const uint64_t pending_id = pending.id;
+
+    // An unregistered send (CLI data) is never acked, so there is nothing to
+    // retry and no result to wait for.
+    Dispatcher::TxResultHandler on_result;
+    if (pending_id != 0) {
+        on_result = [this, pending_id](bool transmitted) {
+            on_tx_result(pending_id, transmitted);
+        };
+    }
+
+    if (!route_packet(p, to, kPriorityDirect, flood, std::move(on_result))) {
+        LOG_ERROR("send: %s is too long after encryption and padding (%zu bytes)",
+                  hex(op_hash).c_str(), text_size);
+        return std::nullopt;
+    }
+    return ack_hash;
+}
+
+std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8_t txt_type,
+                                     uint32_t timestamp) {
+    // CLI data is never acked, so it carries no retry state.
+    const bool acked = txt_type != proto::kTxtCliData;
+
+    if (acked) {
+        // Exact duplicate sends are one logical delivery. Sending the same wire
+        // packet twice would be suppressed by receivers' deduplication anyway,
+        // so coalesce it with the operation already waiting for this ACK.
         auto duplicate = std::find_if(pending_.begin(), pending_.end(), [&](const Pending& pd) {
             return pd.dest_pubkey == to.pubkey && pd.timestamp == timestamp &&
                    pd.txt_type == txt_type && pd.text == text;
@@ -124,53 +169,39 @@ std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8
                       hex(duplicate->ack_hash).c_str());
             return duplicate->ack_hash;
         }
+
+        if (pending_.size() >= cfg_.pending_send_limit) {
+            LOG_WARN("send: pending message limit reached (%u)", cfg_.pending_send_limit);
+            return std::nullopt;
+        }
     }
 
-    if (txt_type != proto::kTxtCliData && pending_.size() >= cfg_.pending_send_limit) {
-        LOG_WARN("send: pending message limit reached (%u)", cfg_.pending_send_limit);
-        return std::nullopt;
-    }
+    Pending pending;
+    pending.id = acked ? next_pending_id_++ : 0;
+    pending.dest_pubkey = to.pubkey;
+    pending.text = text;
+    pending.txt_type = txt_type;
+    pending.timestamp = timestamp;
+    pending.attempt = 0;
 
-    auto env = proto::DirectEnvelope::seal(to.id(), self_.pub()[0], shared, plaintext);
-    proto::Packet p;
-    p.type = proto::PayloadType::TxtMsg;
-    p.payload = env.encode();
+    // Register before transmitting: an idle radio can accept the packet
+    // synchronously, and the retry timer is armed from the result callback.
+    const uint64_t pending_id = pending.id;
+    if (acked) pending_.push_back(std::move(pending));
+    Pending& slot = acked ? pending_.back() : pending;
 
-    // CLI data is never acked, so there is nothing to retry. Acked messages
-    // must be registered before route_packet(): an idle radio can accept the
-    // packet synchronously and invoke the transmission callback immediately.
-    uint64_t pending_id = 0;
-    if (txt_type != proto::kTxtCliData) {
-        Pending pending;
-        pending.id = next_pending_id_++;
-        pending_id = pending.id;
-        pending.ack_hash = ack_hash;
-        pending.accepted_ack_hashes.push_back(ack_hash);
-        pending.dest_pubkey = to.pubkey;
-        pending.text = text;
-        pending.txt_type = txt_type;
-        pending.timestamp = timestamp;
-        pending.attempt = 0;
-        pending_.push_back(std::move(pending));
-    }
-
-    Dispatcher::TxResultHandler on_result;
-    if (txt_type != proto::kTxtCliData) {
-        on_result = [this, pending_id](bool transmitted) {
-            on_tx_result(pending_id, transmitted);
-        };
-    }
-    if (!route_packet(p, to, kPriorityDirect, std::move(on_result))) {
-        LOG_ERROR("send: message is too long after encryption and padding (%zu bytes)",
-                  text.size());
-        std::erase_if(pending_,
-                      [pending_id](const Pending& pending) { return pending.id == pending_id; });
+    auto ack_hash = send_attempt(slot, to, /*force_flood=*/false);
+    if (!ack_hash) {
+        if (acked) {
+            std::erase_if(pending_,
+                          [pending_id](const Pending& pd) { return pd.id == pending_id; });
+        }
         return std::nullopt;
     }
 
     LOG_INFO("send: %zu bytes to %s (ack %s)", text.size(),
              to.name.empty() ? hex_prefix(to.pubkey).c_str() : to.name.c_str(),
-             hex(ack_hash).c_str());
+             hex(*ack_hash).c_str());
     return ack_hash;
 }
 
@@ -221,51 +252,12 @@ void Node::on_retry(uint64_t pending_id) {
         return;
     }
 
-    const Bytes& shared = to->shared_secret(self_);
-    if (shared.empty()) {
-        pending_.erase(it);
-        return;
-    }
-
-    proto::TextMessage msg;
-    msg.timestamp = it->timestamp;
-    msg.txt_type = it->txt_type;
-    // The attempt counter goes on the wire so the receiver can tell a retry
-    // from a genuine duplicate message.
-    msg.attempt = it->attempt;
-    msg.text = to_bytes(it->text);
-
-    Bytes plaintext = msg.encode();
-    ByteView ack_key =
-        it->txt_type == proto::kTxtSignedPlain ? ByteView(to->pubkey) : self_.pub();
-    Bytes retry_ack_hash = proto::message_ack_hash(plaintext, ack_key);
-    it->accepted_ack_hashes.push_back(retry_ack_hash);
-
-    auto env = proto::DirectEnvelope::seal(to->id(), self_.pub()[0], shared, plaintext);
-    proto::Packet p;
-    p.type = proto::PayloadType::TxtMsg;
-    p.payload = env.encode();
-
     // Final attempt: fall back to flooding, since a stale direct path is the
     // most likely reason we have not been acked.
-    bool last = it->attempt == kMaxAttempts - 1;
-    if (last || !to->path_known) {
-        p.route = proto::RouteType::Flood;
-        p.path.clear();
-        LOG_DEBUG("send: retry %u for %s via flood", it->attempt,
-                  hex(it->ack_hash).c_str());
-    } else {
-        p.route = proto::RouteType::Direct;
-        p.path = to->out_path;
-        LOG_DEBUG("send: retry %u for %s via path", it->attempt,
-                  hex(it->ack_hash).c_str());
-    }
-    if (!dispatcher_.send(std::move(p), kPriorityDirect, 0,
-                          [this, pending_id](bool transmitted) {
-                              on_tx_result(pending_id, transmitted);
-                          })) {
-        LOG_ERROR("send: retry for %s could not be queued", hex(it->ack_hash).c_str());
-        pending_.erase(it);
+    const bool last = it->attempt == kMaxAttempts - 1;
+    if (!send_attempt(*it, *to, /*force_flood=*/last)) {
+        std::erase_if(pending_,
+                      [pending_id](const Pending& pd) { return pd.id == pending_id; });
     }
 }
 
@@ -435,14 +427,8 @@ void Node::send_ack(const Contact& to, ByteView ack_hash) {
     p.type = proto::PayloadType::Ack;
     p.payload.assign(ack_hash.begin(), ack_hash.end());
 
-    if (to.path_known) {
-        p.route = proto::RouteType::Direct;
-        p.path = to.out_path;
-    } else {
-        p.route = proto::RouteType::Flood;
-    }
     LOG_DEBUG("ack: sending %s", hex(ack_hash).c_str());
-    dispatcher_.send(std::move(p), kPriorityAck);
+    route_packet(p, to, kPriorityAck);
 }
 
 void Node::handle_ack(const proto::Packet& p) {

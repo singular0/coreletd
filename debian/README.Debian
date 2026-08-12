@@ -11,8 +11,8 @@ configuration first:
 
     sudoedit /etc/umeshcore/umeshcored.ini
 
-`lora_freq` is required and has no built-in default; the shipped file is set
-to 869.618 (EU868). Set the plan for your region, fit an antenna, then:
+`lora_freq` is required and has no built-in default; the shipped file leaves
+it unset. Set the plan for your region, fit an antenna, then:
 
     sudo systemctl enable --now umeshcored
     journalctl -u umeshcored -f

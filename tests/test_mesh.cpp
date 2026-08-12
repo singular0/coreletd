@@ -503,6 +503,96 @@ static void test_pending_send_limit_rejects_new_message() {
     CHECK_EQ(dispatcher.queue_depth(), size_t {1});
 }
 
+static void test_contact_references_survive_insertion() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore store(*self);
+    Bytes key = from_hex(pv::kPubB);
+    Contact& held = *store.upsert(key);
+    held.name = "Held";
+
+    // The receive path holds a Contact& across callbacks that may add contacts.
+    // Enough insertions here to have reallocated a vector several times over.
+    for (uint8_t i = 0; i < 64; i++) store.upsert(Bytes(crypto::kPubKeySize, i));
+
+    CHECK_EQ(store.size(), size_t {65});
+    CHECK(&held == store.find(key));
+    CHECK(held.name == "Held");
+}
+
+// last_seen is persisted state, so anything that updates it has to leave the
+// store dirty; otherwise the update is lost unless something else happens to
+// save before shutdown.
+static void test_received_message_marks_store_dirty() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivB));
+    if (!self) return;
+
+    ContactStore contacts(*self);
+    Contact& peer = *contacts.upsert(from_hex(pv::kPubA));
+    ChannelStore channels;
+    EventLoop loop;
+    radio::RadioParams params;
+    radio::MockRadio radio(params, radio::MockRadio::Options {});
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
+    node.start();
+
+    // The reference packet is a zero-hop flood, so give the contact that exact
+    // route up front: the return path is then unchanged and last_seen is the
+    // only reason the store can come out dirty.
+    contacts.set_path(peer, {});
+
+    const std::string path = "/tmp/umeshcore_test_contacts_touch";
+    CHECK(contacts.save(path));
+    CHECK(!contacts.dirty());
+    std::remove(path.c_str());
+
+    radio.inject(from_hex(pv::kTextPacket));
+
+    CHECK(node.has_messages());
+    CHECK(peer.last_seen != 0);
+    CHECK(peer.last_rssi != 0);
+    CHECK(contacts.dirty());
+}
+
+static void test_direct_ack_marks_store_dirty() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore contacts(*self);
+    Contact& peer = *contacts.upsert(from_hex(pv::kPubB));
+    ChannelStore channels;
+    EventLoop loop;
+    radio::RadioParams params;
+    radio::MockRadio radio(params, radio::MockRadio::Options {});
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
+    node.start();
+
+    // Same inputs as the reference text packet, so the ack vector matches.
+    auto ack = node.send_text(peer, std::string(pv::kTextBody), proto::kTxtPlain, pv::kFixedTime);
+    CHECK(ack.has_value());
+    if (ack) CHECK_BYTES(*ack, from_hex(pv::kTextAckHash));
+
+    const std::string path = "/tmp/umeshcore_test_contacts_ack";
+    CHECK(contacts.save(path));
+    CHECK(!contacts.dirty());
+    std::remove(path.c_str());
+
+    // A direct-routed ack proves the peer heard us, and updates last_seen.
+    radio.inject(from_hex(pv::kAckPacket));
+
+    CHECK(peer.last_seen != 0);
+    CHECK(contacts.dirty());
+}
+
 static void test_contact_limit_rejects_new_but_allows_update() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
@@ -537,6 +627,9 @@ int main() {
     test_earlier_pump_replaces_later_timer();
     test_dispatch_queue_drops_lowest_priority();
     test_pending_send_limit_rejects_new_message();
+    test_contact_references_survive_insertion();
+    test_received_message_marks_store_dirty();
+    test_direct_ack_marks_store_dirty();
     test_contact_limit_rejects_new_but_allows_update();
 
     return finish("mesh");

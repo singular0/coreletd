@@ -259,11 +259,9 @@ Bytes Session::cmd_add_update_contact(ByteView args) {
 
     size_t off = 35;
     if (path_len == kNoPath) {
-        c->path_known = false;
-        c->out_path.clear();
+        contacts_.clear_path(*c);
     } else {
-        c->out_path.assign(args.begin() + off, args.begin() + off + path_len);
-        c->path_known = true;
+        contacts_.set_path(*c, subview(args, off, path_len));
         off += path_len;
     }
 
@@ -300,9 +298,7 @@ Bytes Session::cmd_reset_path(ByteView args) {
     if (!c) return resp_err(kErrNotFound);
 
     // Forget the route so the next message floods and rediscovers it.
-    c->out_path.clear();
-    c->path_known = false;
-    contacts_.mark_dirty();
+    contacts_.clear_path(*c);
     if (!save_contacts()) return resp_err(kErrFileIoError);
     LOG_INFO("companion: reset path to %s", hex_prefix(c->pubkey).c_str());
     return resp_ok();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <optional>
 #include <string>
 #include <vector>
@@ -71,8 +72,26 @@ public:
     Contact* upsert(ByteView pubkey);
     bool remove(ByteView pubkey);
 
-    std::vector<Contact>& all() { return contacts_; }
-    const std::vector<Contact>& all() const { return contacts_; }
+    // --- mutation -------------------------------------------------------
+    // Contacts are handed out by reference, so every field written through one
+    // has to be paired with a dirty flag the caller must remember to set. These
+    // cover the fields the receive path touches and do it themselves.
+
+    // Records that we just heard from a contact.
+    void touch(Contact& c);
+    // As above, plus the radio quality of the packet we heard it in.
+    void touch(Contact& c, int rssi, float snr);
+
+    // Returns false if the contact already had exactly this route, in which
+    // case nothing was written and no notification is owed.
+    bool set_path(Contact& c, ByteView path);
+    bool clear_path(Contact& c);
+
+    // References stay valid across insertion, which the receive path relies on:
+    // it holds a Contact& across dispatcher and delegate callbacks that could
+    // one day add a contact. A vector would reallocate underneath them.
+    std::deque<Contact>& all() { return contacts_; }
+    const std::deque<Contact>& all() const { return contacts_; }
     size_t size() const { return contacts_.size(); }
 
     bool load(const std::string& path);
@@ -86,7 +105,7 @@ public:
 private:
     const crypto::LocalIdentity& self_;
     size_t max_contacts_;
-    std::vector<Contact> contacts_;
+    std::deque<Contact> contacts_;
     bool dirty_ = false;
 };
 

@@ -49,6 +49,37 @@ Contact* ContactStore::upsert(ByteView pubkey) {
     return &contacts_.back();
 }
 
+void ContactStore::touch(Contact& c) {
+    c.last_seen = unix_now();
+    dirty_ = true;
+}
+
+void ContactStore::touch(Contact& c, int rssi, float snr) {
+    // Signal quality is not persisted, but last_seen is, so this always leaves
+    // something worth writing out.
+    c.last_rssi = rssi;
+    c.last_snr = snr;
+    touch(c);
+}
+
+bool ContactStore::set_path(Contact& c, ByteView path) {
+    if (c.path_known && c.out_path.size() == path.size() &&
+        std::equal(c.out_path.begin(), c.out_path.end(), path.begin()))
+        return false;
+    c.out_path.assign(path.begin(), path.end());
+    c.path_known = true;
+    dirty_ = true;
+    return true;
+}
+
+bool ContactStore::clear_path(Contact& c) {
+    if (!c.path_known && c.out_path.empty()) return false;
+    c.out_path.clear();
+    c.path_known = false;
+    dirty_ = true;
+    return true;
+}
+
 Contact* ContactStore::apply_advert(const proto::Advert& adv, const proto::AdvertAppData& app,
                                     bool& created) {
     created = false;
@@ -182,7 +213,7 @@ bool ContactStore::load(const std::string& path) {
     std::ifstream in(path);
     if (!in) return false;
 
-    std::vector<Contact> loaded;
+    std::deque<Contact> loaded;
     std::string line;
     int lineno = 0;
     bool saw_header = false;

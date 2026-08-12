@@ -343,8 +343,7 @@ void Node::handle_advert(const proto::Packet& p) {
     Contact* c = contacts_.apply_advert(*adv, *app, created);
     if (!c) return;  // replay or not newer
 
-    c->last_rssi = p.rssi;
-    c->last_snr = p.snr;
+    contacts_.touch(*c, p.rssi, p.snr);
 
     // A flood advert accumulates the path it travelled; reversed, that is our
     // route back to the sender.
@@ -366,11 +365,8 @@ void Node::record_return_path(Contact& c, const proto::Packet& p) {
     if (p.path.size() > cfg_.max_hops) return;
 
     Bytes reversed(p.path.rbegin(), p.path.rend());
-    if (c.path_known && c.out_path == reversed) return;
+    if (!contacts_.set_path(c, reversed)) return;  // route unchanged
 
-    c.out_path = std::move(reversed);
-    c.path_known = true;
-    contacts_.mark_dirty();
     LOG_DEBUG("path: %s now reachable via %s", hex_prefix(c.pubkey).c_str(),
               c.out_path.empty() ? "direct" : hex(c.out_path).c_str());
     if (delegate_) delegate_->on_path_updated(c);
@@ -408,9 +404,7 @@ void Node::handle_text(const proto::Packet& p) {
     auto msg = proto::TextMessage::decode(plaintext);
     if (!msg) return;
 
-    from->last_seen = unix_now();
-    from->last_rssi = p.rssi;
-    from->last_snr = p.snr;
+    contacts_.touch(*from, p.rssi, p.snr);
     if (p.is_flood()) record_return_path(*from, p);
 
     const std::string body = msg->body();
@@ -471,7 +465,7 @@ void Node::handle_ack(const proto::Packet& p) {
 
     // A direct-routed ack proves the path we used still works.
     if (Contact* c = contacts_.find(it->dest_pubkey); c && p.is_direct()) {
-        c->last_seen = unix_now();
+        contacts_.touch(*c);
     }
 
     // Notify the companion with the original hash returned by CMD_SEND_TXT,
@@ -492,10 +486,8 @@ void Node::handle_path(const proto::Packet& p) {
     auto path = proto::PathReturn::decode(plaintext);
     if (!path) return;
 
-    from->out_path = path->path;
-    from->path_known = true;
-    from->last_seen = unix_now();
-    contacts_.mark_dirty();
+    contacts_.set_path(*from, path->path);
+    contacts_.touch(*from);
     LOG_INFO("path: %s returned route %s", hex_prefix(from->pubkey).c_str(),
              path->path.empty() ? "direct" : hex(path->path).c_str());
     if (delegate_) delegate_->on_path_updated(*from);

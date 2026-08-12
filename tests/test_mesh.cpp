@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <fstream>
 
 #include "crypto/crypto.h"
 #include "mesh/channels.h"
@@ -51,6 +52,10 @@ static void test_public_channel() {
     // The wire identifier is the first byte of SHA-256 over the key.
     Bytes digest = crypto::sha256(pub.secret);
     CHECK_EQ(pub.hash(), digest[0]);
+
+    Channel short_key;
+    short_key.secret = {1, 2, 3};
+    CHECK(!short_key.valid());
 }
 
 static void test_hashtag_channel_derivation() {
@@ -158,6 +163,79 @@ static void test_contact_flood_vs_zero_hop_path_survives_reload() {
     if (d) CHECK(d->path_known && d->out_path.empty());
     if (f) CHECK(!f->path_known);
 
+    std::remove(path.c_str());
+}
+
+static void test_contact_load_is_all_or_nothing() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore store(*self);
+    Bytes retained_key = from_hex(pv::kPubB);
+    Contact* retained = store.upsert(retained_key);
+    if (!retained) return;
+    retained->name = "Retained";
+    CHECK(store.dirty());
+
+    const std::string path = "/tmp/umeshcore_test_contacts_corrupt";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# umeshcore contacts v1\n";
+        out << pv::kPubA << "\t1\t0\t100\t100\t0\t0\t-\tNew\n";
+        // The old loader silently narrowed this to uint8_t and accepted the
+        // first record, replacing the live store with partial state.
+        out << pv::kPubB << "\t256\t0\t100\t100\t0\t0\t-\tBad\n";
+    }
+
+    CHECK(!store.load(path));
+    const Contact* still_there = store.find(retained_key);
+    CHECK(still_there != nullptr);
+    if (still_there) CHECK(still_there->name == "Retained");
+    CHECK(store.find(from_hex(pv::kPubA)) == nullptr);
+    CHECK(store.dirty());
+
+    // A truncated file with no records must not be mistaken for an
+    // intentionally empty store; saves always carry the version header.
+    {
+        std::ofstream out(path, std::ios::trunc);
+    }
+    CHECK(!store.load(path));
+    CHECK(store.find(retained_key) != nullptr);
+    std::remove(path.c_str());
+}
+
+static void test_channel_load_is_all_or_nothing() {
+    ChannelStore store;
+    Channel retained = Channel::from_hashtag("#retained");
+    store.set(1, retained);
+    CHECK(store.dirty());
+
+    const std::string path = "/tmp/umeshcore_test_channels_corrupt";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# umeshcore channels v1\n";
+        out << "2\t00112233445566778899aabbccddeeff\tNew\n";
+        out << "3\tabcd\tShort key\n";
+    }
+
+    CHECK(!store.load(path));
+    CHECK(store.at(0) && store.at(0)->valid());
+    CHECK(store.at(1) && store.at(1)->secret == retained.secret);
+    CHECK(store.at(2) && !store.at(2)->valid());
+    CHECK(store.dirty());
+
+    // A completely valid file commits as one replacement; omission of slot 0
+    // is an intentional clear, not damage inferred from a partial parse.
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# umeshcore channels v1\n";
+        out << "2\t00112233445566778899aabbccddeeff\tOnly\n";
+    }
+    CHECK(store.load(path));
+    CHECK(store.at(0) && !store.at(0)->valid());
+    CHECK(store.at(1) && !store.at(1)->valid());
+    CHECK(store.at(2) && store.at(2)->valid());
+    CHECK(!store.dirty());
     std::remove(path.c_str());
 }
 
@@ -446,6 +524,8 @@ int main() {
     test_channel_store_slots();
     test_contact_store_roundtrip();
     test_contact_flood_vs_zero_hop_path_survives_reload();
+    test_contact_load_is_all_or_nothing();
+    test_channel_load_is_all_or_nothing();
     test_advert_replay_is_rejected();
     test_shared_secret_is_cached_and_symmetric();
     test_by_id_returns_all_colliding_contacts();

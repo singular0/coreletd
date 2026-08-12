@@ -1,9 +1,10 @@
 #include "mesh/contacts.h"
 
 #include <algorithm>
-#include <cstdlib>
+#include <charconv>
 #include <fstream>
-#include <sstream>
+#include <limits>
+#include <string_view>
 
 #include "util/clock.h"
 #include "util/hex.h"
@@ -105,6 +106,39 @@ std::string sanitise(std::string s) {
         if (c == '\t' || c == '\n' || c == '\r') c = ' ';
     return s;
 }
+
+bool split_fields(std::string_view line, size_t count, std::vector<std::string_view>& fields) {
+    fields.clear();
+    fields.reserve(count);
+    for (size_t i = 1; i < count; i++) {
+        size_t tab = line.find('\t');
+        if (tab == std::string_view::npos) return false;
+        fields.push_back(line.substr(0, tab));
+        line.remove_prefix(tab + 1);
+    }
+    if (line.find('\t') != std::string_view::npos) return false;
+    fields.push_back(line);
+    return true;
+}
+
+bool parse_unsigned(std::string_view text, uint64_t max, uint64_t& value) {
+    if (text.empty()) return false;
+    uint64_t parsed = 0;
+    auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), parsed, 10);
+    if (ec != std::errc {} || end != text.data() + text.size() || parsed > max) return false;
+    value = parsed;
+    return true;
+}
+
+bool parse_signed(std::string_view text, int64_t min, int64_t max, int64_t& value) {
+    if (text.empty()) return false;
+    int64_t parsed = 0;
+    auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), parsed, 10);
+    if (ec != std::errc {} || end != text.data() + text.size() || parsed < min || parsed > max)
+        return false;
+    value = parsed;
+    return true;
+}
 }  // namespace
 
 bool ContactStore::save(const std::string& path) {
@@ -141,57 +175,80 @@ bool ContactStore::load(const std::string& path) {
     std::ifstream in(path);
     if (!in) return false;
 
-    contacts_.clear();
+    std::vector<Contact> loaded;
     std::string line;
     int lineno = 0;
+    bool saw_header = false;
     while (std::getline(in, line)) {
         lineno++;
+        if (line == "# umeshcore contacts v1") {
+            saw_header = true;
+            continue;
+        }
         if (line.empty() || line[0] == '#') continue;
 
-        std::istringstream ss(line);
-        std::string pubkey_hex, type, flags, adv_ts, last_seen, lat, lon, path_str, name;
-        if (!std::getline(ss, pubkey_hex, '\t') || !std::getline(ss, type, '\t') ||
-            !std::getline(ss, flags, '\t') || !std::getline(ss, adv_ts, '\t') ||
-            !std::getline(ss, last_seen, '\t') || !std::getline(ss, lat, '\t') ||
-            !std::getline(ss, lon, '\t') || !std::getline(ss, path_str, '\t')) {
-            LOG_WARN("contacts: %s:%d malformed, skipping", path.c_str(), lineno);
-            continue;
-        }
-        std::getline(ss, name);  // may legitimately be empty
+        auto fail = [&](const char* why) {
+            LOG_ERROR("contacts: %s:%d %s", path.c_str(), lineno, why);
+            return false;
+        };
 
-        auto pubkey = unhex(pubkey_hex);
+        std::vector<std::string_view> fields;
+        if (!split_fields(line, 9, fields)) return fail("malformed record");
+
+        auto pubkey = unhex(fields[0]);
         if (!pubkey || pubkey->size() != crypto::kPubKeySize) {
-            LOG_WARN("contacts: %s:%d bad public key, skipping", path.c_str(), lineno);
-            continue;
+            return fail("invalid public key");
         }
+        if (std::any_of(loaded.begin(), loaded.end(), [&](const Contact& c) {
+                return crypto::equal(c.pubkey, *pubkey);
+            }))
+            return fail("duplicate public key");
+
+        uint64_t type = 0, flags = 0, adv_timestamp = 0, last_seen = 0;
+        int64_t lat = 0, lon = 0;
+        if (!parse_unsigned(fields[1], std::numeric_limits<uint8_t>::max(), type) ||
+            !parse_unsigned(fields[2], std::numeric_limits<uint8_t>::max(), flags) ||
+            !parse_unsigned(fields[3], std::numeric_limits<uint32_t>::max(), adv_timestamp) ||
+            !parse_unsigned(fields[4], std::numeric_limits<uint32_t>::max(), last_seen) ||
+            !parse_signed(fields[5], -90000000, 90000000, lat) ||
+            !parse_signed(fields[6], -180000000, 180000000, lon))
+            return fail("invalid numeric field");
 
         Contact c;
         c.pubkey = std::move(*pubkey);
-        c.name = name;
-        c.type = static_cast<uint8_t>(std::strtoul(type.c_str(), nullptr, 10));
-        c.flags = static_cast<uint8_t>(std::strtoul(flags.c_str(), nullptr, 10));
-        c.adv_timestamp = static_cast<uint32_t>(std::strtoul(adv_ts.c_str(), nullptr, 10));
-        c.last_seen = static_cast<uint32_t>(std::strtoul(last_seen.c_str(), nullptr, 10));
-        c.lat_e6 = static_cast<int32_t>(std::strtol(lat.c_str(), nullptr, 10));
-        c.lon_e6 = static_cast<int32_t>(std::strtol(lon.c_str(), nullptr, 10));
+        c.name = fields[8];
+        c.type = static_cast<uint8_t>(type);
+        c.flags = static_cast<uint8_t>(flags);
+        c.adv_timestamp = static_cast<uint32_t>(adv_timestamp);
+        c.last_seen = static_cast<uint32_t>(last_seen);
+        c.lat_e6 = static_cast<int32_t>(lat);
+        c.lon_e6 = static_cast<int32_t>(lon);
 
-        if (path_str == "direct") {
+        if (fields[7] == "direct") {
             c.path_known = true;
-        } else if (path_str != "-") {
-            if (auto p = unhex(path_str)) {
-                c.out_path = std::move(*p);
-                c.path_known = true;
-            }
+        } else if (fields[7] != "-") {
+            auto parsed_path = unhex(fields[7]);
+            if (!parsed_path || parsed_path->empty() ||
+                parsed_path->size() > proto::kMaxPathSize)
+                return fail("invalid path");
+            c.out_path = std::move(*parsed_path);
+            c.path_known = true;
         }
-        if (contacts_.size() >= max_contacts_) {
-            LOG_ERROR("contacts: %s exceeds limit of %zu", path.c_str(), max_contacts_);
-            return false;
-        }
-        contacts_.push_back(std::move(c));
+        if (loaded.size() >= max_contacts_) return fail("contact limit exceeded");
+        loaded.push_back(std::move(c));
+    }
+    if (in.bad()) {
+        LOG_ERROR("contacts: read from %s failed", path.c_str());
+        return false;
+    }
+    if (!saw_header) {
+        LOG_ERROR("contacts: %s has no valid format header", path.c_str());
+        return false;
     }
 
-    LOG_INFO("contacts: loaded %zu from %s", contacts_.size(), path.c_str());
+    contacts_ = std::move(loaded);
     dirty_ = false;
+    LOG_INFO("contacts: loaded %zu from %s", contacts_.size(), path.c_str());
     return true;
 }
 

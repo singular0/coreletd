@@ -17,7 +17,7 @@ struct Channel {
 
     // Channel identifier on the wire: first byte of SHA-256 over the key.
     uint8_t hash() const;
-    bool valid() const { return !secret.empty(); }
+    bool valid() const { return secret.size() == 16; }
 
     // "Hashtag" channels are public and derive their key from the name, so
     // anyone who knows `#jokes` can join without exchanging a key.

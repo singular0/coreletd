@@ -1,8 +1,9 @@
 #include "mesh/channels.h"
 
+#include <array>
+#include <charconv>
 #include <fstream>
-#include <cstdlib>
-#include <sstream>
+#include <string_view>
 
 #include "crypto/crypto.h"
 #include "util/hex.h"
@@ -11,7 +12,7 @@
 namespace umc::mesh {
 
 uint8_t Channel::hash() const {
-    if (secret.empty()) return 0;
+    if (!valid()) return 0;
     return crypto::sha256(secret)[0];
 }
 
@@ -91,31 +92,61 @@ bool ChannelStore::load(const std::string& path) {
     if (!in) return false;
 
     // Start empty so a saved file with slot 0 cleared stays cleared.
-    channels_.assign(kMaxChannels, Channel {});
+    std::vector<Channel> loaded(kMaxChannels);
+    std::array<bool, kMaxChannels> occupied {};
 
     std::string line;
     int lineno = 0;
+    bool saw_header = false;
     while (std::getline(in, line)) {
         lineno++;
+        if (line == "# umeshcore channels v1") {
+            saw_header = true;
+            continue;
+        }
         if (line.empty() || line[0] == '#') continue;
 
-        std::istringstream ss(line);
-        std::string idx, key, name;
-        if (!std::getline(ss, idx, '\t') || !std::getline(ss, key, '\t')) {
-            LOG_WARN("channels: %s:%d malformed, skipping", path.c_str(), lineno);
-            continue;
-        }
-        std::getline(ss, name);
+        auto fail = [&](const char* why) {
+            LOG_ERROR("channels: %s:%d %s", path.c_str(), lineno, why);
+            return false;
+        };
 
-        size_t i = std::strtoul(idx.c_str(), nullptr, 10);
+        size_t first_tab = line.find('\t');
+        size_t second_tab = first_tab == std::string::npos
+                                ? std::string::npos
+                                : line.find('\t', first_tab + 1);
+        if (first_tab == std::string::npos || second_tab == std::string::npos ||
+            line.find('\t', second_tab + 1) != std::string::npos)
+            return fail("malformed record");
+
+        std::string_view idx(line.data(), first_tab);
+        std::string_view key(line.data() + first_tab + 1, second_tab - first_tab - 1);
+        std::string_view name(line.data() + second_tab + 1, line.size() - second_tab - 1);
+
+        size_t slot = 0;
+        auto [end, ec] = std::from_chars(idx.data(), idx.data() + idx.size(), slot, 10);
+        if (idx.empty() || ec != std::errc {} || end != idx.data() + idx.size() ||
+            slot >= kMaxChannels)
+            return fail("invalid slot");
+        if (occupied[slot]) return fail("duplicate slot");
+
         auto secret = unhex(key);
-        if (i >= kMaxChannels || !secret || secret->empty()) {
-            LOG_WARN("channels: %s:%d bad slot or key, skipping", path.c_str(), lineno);
-            continue;
-        }
-        channels_[i].name = name;
-        channels_[i].secret = std::move(*secret);
+        if (!secret || secret->size() != 16) return fail("channel key must be 16 bytes");
+
+        loaded[slot].name = name;
+        loaded[slot].secret = std::move(*secret);
+        occupied[slot] = true;
     }
+    if (in.bad()) {
+        LOG_ERROR("channels: read from %s failed", path.c_str());
+        return false;
+    }
+    if (!saw_header) {
+        LOG_ERROR("channels: %s has no valid format header", path.c_str());
+        return false;
+    }
+
+    channels_ = std::move(loaded);
     dirty_ = false;
     return true;
 }

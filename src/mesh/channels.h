@@ -27,7 +27,9 @@ struct Channel {
 
 class ChannelStore {
 public:
-    ChannelStore();
+    // As with ContactStore, the store owns its file. An empty path makes it
+    // in-memory only.
+    explicit ChannelStore(std::string path = {});
 
     // The companion protocol addresses channels by slot index.
     static constexpr size_t kMaxChannels = 8;
@@ -40,12 +42,13 @@ public:
     // Every channel whose hash matches; the caller disambiguates by MAC.
     std::vector<std::pair<size_t, Channel*>> by_hash(uint8_t hash);
 
-    bool load(const std::string& path);
+    bool load();
     // Clears dirty state only after the replacement file is safely installed.
-    bool save(const std::string& path);
+    bool save();
     bool dirty() const { return dirty_; }
 
 private:
+    std::string path_;
     std::vector<Channel> channels_;
     bool dirty_ = false;
 };

@@ -12,12 +12,14 @@
 #include "mesh/contacts.h"
 #include "mesh/dispatcher.h"
 #include "mesh/node.h"
+#include "mesh/state_writer.h"
 #include "radio/radio.h"
 
 namespace umc {
 
 // Owns every subsystem and wires them together. Construction order matters:
-// identity, then radio, then dispatcher, then node, then companion server.
+// identity, then radio, then dispatcher, then node, then the state writer, then
+// the companion server.
 class App {
 public:
     explicit App(Config cfg);
@@ -47,6 +49,7 @@ private:
     std::unique_ptr<mesh::ChannelStore> channels_;
     std::unique_ptr<mesh::Dispatcher> dispatcher_;
     std::unique_ptr<mesh::Node> node_;
+    std::unique_ptr<mesh::StateWriter> state_;
     std::unique_ptr<companion::Server> server_;
     std::unique_ptr<companion::Session> session_;
 };

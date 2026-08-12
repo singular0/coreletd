@@ -7,6 +7,7 @@
 #include "mesh/dispatcher.h"
 #include "mesh/inbox.h"
 #include "mesh/node.h"
+#include "mesh/state_writer.h"
 #include "radio/mock_radio.h"
 #include "tests/packet_vectors.h"
 #include "tests/test_util.h"
@@ -101,7 +102,8 @@ static void test_contact_store_roundtrip() {
     CHECK(self.has_value());
     if (!self) return;
 
-    ContactStore store(*self);
+    const std::string path = "/tmp/umeshcore_test_contacts";
+    ContactStore store(*self, path);
     Bytes pub_b = from_hex(pv::kPubB);
 
     Contact& c = *store.upsert(pub_b);
@@ -114,12 +116,11 @@ static void test_contact_store_roundtrip() {
     c.out_path = {0xaa, 0xbb};
     c.path_known = true;
 
-    const std::string path = "/tmp/umeshcore_test_contacts";
-    CHECK(store.save(path));
+    CHECK(store.save());
     CHECK(!store.dirty());
 
-    ContactStore reloaded(*self);
-    CHECK(reloaded.load(path));
+    ContactStore reloaded(*self, path);
+    CHECK(reloaded.load());
     CHECK_EQ(reloaded.size(), size_t {1});
 
     const Contact* got = reloaded.find(pub_b);
@@ -140,7 +141,8 @@ static void test_contact_flood_vs_zero_hop_path_survives_reload() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
 
-    ContactStore store(*self);
+    const std::string path = "/tmp/umeshcore_test_contacts2";
+    ContactStore store(*self, path);
     Bytes pub_b = from_hex(pv::kPubB);
     Bytes pub_a = from_hex(pv::kPubA);
 
@@ -153,11 +155,10 @@ static void test_contact_flood_vs_zero_hop_path_survives_reload() {
     Contact& flood = *store.upsert(pub_a);
     flood.path_known = false;
 
-    const std::string path = "/tmp/umeshcore_test_contacts2";
-    CHECK(store.save(path));
+    CHECK(store.save());
 
-    ContactStore reloaded(*self);
-    CHECK(reloaded.load(path));
+    ContactStore reloaded(*self, path);
+    CHECK(reloaded.load());
 
     const Contact* d = reloaded.find(pub_b);
     const Contact* f = reloaded.find(pub_a);
@@ -174,14 +175,14 @@ static void test_contact_load_is_all_or_nothing() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
 
-    ContactStore store(*self);
+    const std::string path = "/tmp/umeshcore_test_contacts_corrupt";
+    ContactStore store(*self, path);
     Bytes retained_key = from_hex(pv::kPubB);
     Contact* retained = store.upsert(retained_key);
     if (!retained) return;
     retained->name = "Retained";
     CHECK(store.dirty());
 
-    const std::string path = "/tmp/umeshcore_test_contacts_corrupt";
     {
         std::ofstream out(path, std::ios::trunc);
         out << "# umeshcore contacts v1\n";
@@ -191,7 +192,7 @@ static void test_contact_load_is_all_or_nothing() {
         out << pv::kPubB << "\t256\t0\t100\t100\t0\t0\t-\tBad\n";
     }
 
-    CHECK(!store.load(path));
+    CHECK(!store.load());
     const Contact* still_there = store.find(retained_key);
     CHECK(still_there != nullptr);
     if (still_there) CHECK(still_there->name == "Retained");
@@ -203,18 +204,18 @@ static void test_contact_load_is_all_or_nothing() {
     {
         std::ofstream out(path, std::ios::trunc);
     }
-    CHECK(!store.load(path));
+    CHECK(!store.load());
     CHECK(store.find(retained_key) != nullptr);
     std::remove(path.c_str());
 }
 
 static void test_channel_load_is_all_or_nothing() {
-    ChannelStore store;
+    const std::string path = "/tmp/umeshcore_test_channels_corrupt";
+    ChannelStore store(path);
     Channel retained = Channel::from_hashtag("#retained");
     store.set(1, retained);
     CHECK(store.dirty());
 
-    const std::string path = "/tmp/umeshcore_test_channels_corrupt";
     {
         std::ofstream out(path, std::ios::trunc);
         out << "# umeshcore channels v1\n";
@@ -222,7 +223,7 @@ static void test_channel_load_is_all_or_nothing() {
         out << "3\tabcd\tShort key\n";
     }
 
-    CHECK(!store.load(path));
+    CHECK(!store.load());
     CHECK(store.at(0) && store.at(0)->valid());
     CHECK(store.at(1) && store.at(1)->secret == retained.secret);
     CHECK(store.at(2) && !store.at(2)->valid());
@@ -235,7 +236,7 @@ static void test_channel_load_is_all_or_nothing() {
         out << "# umeshcore channels v1\n";
         out << "2\t00112233445566778899aabbccddeeff\tOnly\n";
     }
-    CHECK(store.load(path));
+    CHECK(store.load());
     CHECK(store.at(0) && !store.at(0)->valid());
     CHECK(store.at(1) && !store.at(1)->valid());
     CHECK(store.at(2) && store.at(2)->valid());
@@ -344,16 +345,16 @@ static void test_failed_store_saves_remain_dirty() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
 
-    ContactStore contacts(*self);
+    ContactStore contacts(*self, "/nonexistent/umeshcore/contacts");
     contacts.upsert(from_hex(pv::kPubB));
     CHECK(contacts.dirty());
-    CHECK(!contacts.save("/nonexistent/umeshcore/contacts"));
+    CHECK(!contacts.save());
     CHECK(contacts.dirty());
 
-    ChannelStore channels;
+    ChannelStore channels("/nonexistent/umeshcore/channels");
     channels.set(1, Channel::from_hashtag("#persist"));
     CHECK(channels.dirty());
-    CHECK(!channels.save("/nonexistent/umeshcore/channels"));
+    CHECK(!channels.save());
     CHECK(channels.dirty());
 }
 
@@ -598,7 +599,8 @@ static void test_received_message_marks_store_dirty() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivB));
     if (!self) return;
 
-    ContactStore contacts(*self);
+    const std::string path = "/tmp/umeshcore_test_contacts_touch";
+    ContactStore contacts(*self, path);
     Contact& peer = *contacts.upsert(from_hex(pv::kPubA));
     ChannelStore channels;
     EventLoop loop;
@@ -616,8 +618,7 @@ static void test_received_message_marks_store_dirty() {
     // only reason the store can come out dirty.
     contacts.set_path(peer, {});
 
-    const std::string path = "/tmp/umeshcore_test_contacts_touch";
-    CHECK(contacts.save(path));
+    CHECK(contacts.save());
     CHECK(!contacts.dirty());
     std::remove(path.c_str());
 
@@ -633,7 +634,8 @@ static void test_direct_ack_marks_store_dirty() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
 
-    ContactStore contacts(*self);
+    const std::string path = "/tmp/umeshcore_test_contacts_ack";
+    ContactStore contacts(*self, path);
     Contact& peer = *contacts.upsert(from_hex(pv::kPubB));
     ChannelStore channels;
     EventLoop loop;
@@ -651,8 +653,7 @@ static void test_direct_ack_marks_store_dirty() {
     CHECK(ack.has_value());
     if (ack) CHECK_BYTES(*ack, from_hex(pv::kTextAckHash));
 
-    const std::string path = "/tmp/umeshcore_test_contacts_ack";
-    CHECK(contacts.save(path));
+    CHECK(contacts.save());
     CHECK(!contacts.dirty());
     std::remove(path.c_str());
 
@@ -684,11 +685,75 @@ static void test_inbox_drops_oldest_when_full() {
     CHECK(!inbox.pop().has_value());
 }
 
+// Companion commands are answered before their state reaches disk, so that an
+// app working through its contact list one command at a time costs one durable
+// replacement rather than one per contact.
+static void test_state_writer_batches_deferred_saves() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    const std::string contacts_path = "/tmp/umeshcore_test_writer_contacts";
+    const std::string channels_path = "/tmp/umeshcore_test_writer_channels";
+
+    EventLoop loop;
+    ContactStore contacts(*self, contacts_path);
+    ChannelStore channels(channels_path);
+    StateWriter writer(loop, contacts, channels, 5);
+
+    contacts.upsert(from_hex(pv::kPubB));
+    writer.request_save();
+    channels.set(1, Channel::from_hashtag("#writer"));
+    writer.request_save();
+
+    // Neither request wrote anything on its own.
+    CHECK(contacts.dirty());
+    CHECK(channels.dirty());
+
+    loop.add_timer(30, [&loop] { loop.stop(); });
+    loop.run();
+
+    // One pass covers every store that had changed, including the one whose
+    // change arrived after the write was already scheduled.
+    CHECK(!contacts.dirty());
+    CHECK(!channels.dirty());
+    CHECK(writer.healthy());
+
+    ContactStore reloaded(*self, contacts_path);
+    CHECK(reloaded.load());
+    CHECK(reloaded.find(from_hex(pv::kPubB)) != nullptr);
+
+    ChannelStore reloaded_channels(channels_path);
+    CHECK(reloaded_channels.load());
+    CHECK(reloaded_channels.at(1) && reloaded_channels.at(1)->valid());
+
+    std::remove(contacts_path.c_str());
+    std::remove(channels_path.c_str());
+}
+
+// Deferring the write means the command that caused it cannot report the
+// failure, so an unwritable state directory has to stay visible afterwards.
+static void test_state_writer_reports_failed_writes() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    EventLoop loop;
+    ContactStore contacts(*self, "/nonexistent/umeshcore/contacts");
+    ChannelStore channels("/nonexistent/umeshcore/channels");
+    StateWriter writer(loop, contacts, channels);
+    CHECK(writer.healthy());
+
+    contacts.upsert(from_hex(pv::kPubB));
+    CHECK(!writer.flush());
+    CHECK(!writer.healthy());
+    // Still dirty, so the next attempt retries instead of losing the change.
+    CHECK(contacts.dirty());
+}
+
 static void test_contact_limit_rejects_new_but_allows_update() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
 
-    ContactStore contacts(*self, 1);
+    ContactStore contacts(*self, {}, 1);
     Bytes first_key = from_hex(pv::kPubB);
     Contact* first = contacts.upsert(first_key);
     CHECK(first != nullptr);
@@ -723,6 +788,8 @@ int main() {
     test_received_message_marks_store_dirty();
     test_direct_ack_marks_store_dirty();
     test_inbox_drops_oldest_when_full();
+    test_state_writer_batches_deferred_saves();
+    test_state_writer_reports_failed_writes();
     test_contact_limit_rejects_new_but_allows_update();
 
     return finish("mesh");

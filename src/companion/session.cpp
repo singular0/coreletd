@@ -39,12 +39,14 @@ void put_padded(Bytes& out, ByteView data, size_t width) {
 }  // namespace
 
 Session::Session(Server& server, mesh::Node& node, mesh::ContactStore& contacts,
-                 mesh::ChannelStore& channels, radio::Radio& radio, DeviceInfo info)
+                 mesh::ChannelStore& channels, radio::Radio& radio, mesh::StateWriter& state,
+                 DeviceInfo info)
     : server_(server),
       node_(node),
       contacts_(contacts),
       channels_(channels),
       radio_(radio),
+      state_(state),
       info_(std::move(info)) {}
 
 void Session::attach() {
@@ -53,17 +55,13 @@ void Session::attach() {
     node_.set_delegate(this);
 }
 
-void Session::set_store_paths(std::string contacts_path, std::string channels_path) {
-    contacts_path_ = std::move(contacts_path);
-    channels_path_ = std::move(channels_path);
-}
-
-bool Session::save_contacts() {
-    return !contacts_path_.empty() && contacts_.save(contacts_path_);
-}
-
-bool Session::save_channels() {
-    return !channels_path_.empty() && channels_.save(channels_path_);
+Bytes Session::saved_reply() {
+    state_.request_save();
+    // The write has not happened yet, so this reports the state directory as
+    // the previous write found it. Answering OK per command and writing once
+    // is the trade the app wants: it syncs contacts one at a time, and each
+    // synchronous save was a full rewrite plus two fsyncs.
+    return state_.healthy() ? resp_ok() : resp_err(kErrFileIoError);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,17 +277,15 @@ Bytes Session::cmd_add_update_contact(ByteView args) {
     }
 
     contacts_.mark_dirty();
-    if (!save_contacts()) return resp_err(kErrFileIoError);
     LOG_INFO("companion: contact %s (%s) added/updated", hex_prefix(c->pubkey).c_str(),
              c->name.c_str());
-    return resp_ok();
+    return saved_reply();
 }
 
 Bytes Session::cmd_remove_contact(ByteView args) {
     if (args.size() < crypto::kPubKeySize) return resp_err(kErrIllegalArg);
     if (!contacts_.remove(subview(args, 0, crypto::kPubKeySize))) return resp_err(kErrNotFound);
-    if (!save_contacts()) return resp_err(kErrFileIoError);
-    return resp_ok();
+    return saved_reply();
 }
 
 Bytes Session::cmd_reset_path(ByteView args) {
@@ -299,9 +295,8 @@ Bytes Session::cmd_reset_path(ByteView args) {
 
     // Forget the route so the next message floods and rediscovers it.
     contacts_.clear_path(*c);
-    if (!save_contacts()) return resp_err(kErrFileIoError);
     LOG_INFO("companion: reset path to %s", hex_prefix(c->pubkey).c_str());
-    return resp_ok();
+    return saved_reply();
 }
 
 Bytes Session::cmd_export_contact(ByteView args) {
@@ -436,9 +431,8 @@ Bytes Session::cmd_set_channel(ByteView args) {
         ch.secret.clear();
 
     channels_.set(index, std::move(ch));
-    if (!save_channels()) return resp_err(kErrFileIoError);
     LOG_INFO("companion: channel %u set", index);
-    return resp_ok();
+    return saved_reply();
 }
 
 Bytes Session::cmd_set_advert_name(ByteView args) {
@@ -490,7 +484,7 @@ void Session::on_contact_changed(const mesh::Contact& c, bool is_new) {
         put_bytes(out, c.pubkey);
         reply(out);
     }
-    if (contacts_.dirty()) save_contacts();
+    state_.request_save();
 }
 
 void Session::on_path_updated(const mesh::Contact& c) {

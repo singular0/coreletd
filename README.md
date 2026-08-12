@@ -183,7 +183,7 @@ src/
   crypto/     Ed25519 (expanded-key), X25519, AES-128-ECB + HMAC, identity
   proto/      packet header/path codec, payload codecs
   radio/      Radio interface, duty cycle, mock radio, SX1262 (spidev + libgpiod)
-  mesh/       dispatcher (dedup, priority TX queue), contacts, channels, node
+  mesh/       dispatcher (dedup, priority TX queue), contacts, channels, state writer, node
   companion/  frame codec, TCP server, command session
   daemon/     config, poll() event loop, wiring
 tests/        unit tests + generated reference vectors

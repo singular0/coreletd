@@ -67,6 +67,7 @@ add_library(umeshcore_core STATIC
     src/mesh/dispatcher.cpp
     src/mesh/inbox.cpp
     src/mesh/sender.cpp
+    src/mesh/state_writer.cpp
     src/mesh/node.cpp
     src/companion/frames.cpp
     src/companion/server.cpp

@@ -50,9 +50,12 @@ class ContactStore {
 public:
     static constexpr size_t kMaxContacts = 100;
 
-    explicit ContactStore(const crypto::LocalIdentity& self,
+    // The store owns the file it lives in; nothing else needs to know the path.
+    // An empty one makes this an in-memory store: load() and save() do nothing
+    // and report failure rather than pretend anything reached disk.
+    explicit ContactStore(const crypto::LocalIdentity& self, std::string path = {},
                           size_t max_contacts = kMaxContacts)
-        : self_(self), max_contacts_(max_contacts) {}
+        : self_(self), path_(std::move(path)), max_contacts_(max_contacts) {}
 
     Contact* find(ByteView pubkey);
     const Contact* find(ByteView pubkey) const;
@@ -94,16 +97,17 @@ public:
     const std::deque<Contact>& all() const { return contacts_; }
     size_t size() const { return contacts_.size(); }
 
-    bool load(const std::string& path);
+    bool load();
     // Clears dirty state only after the replacement file is safely installed.
-    bool save(const std::string& path);
+    bool save();
     // Set when anything changed, so the daemon can persist lazily instead of
-    // rewriting the file on every received packet.
+    // rewriting the file on every received packet. StateWriter decides when.
     bool dirty() const { return dirty_; }
     void mark_dirty() { dirty_ = true; }
 
 private:
     const crypto::LocalIdentity& self_;
+    std::string path_;
     size_t max_contacts_;
     std::deque<Contact> contacts_;
     bool dirty_ = false;

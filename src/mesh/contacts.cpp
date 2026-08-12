@@ -173,7 +173,12 @@ bool parse_signed(std::string_view text, int64_t min, int64_t max, int64_t& valu
 }
 }  // namespace
 
-bool ContactStore::save(const std::string& path) {
+bool ContactStore::save() {
+    if (path_.empty()) {
+        LOG_ERROR("contacts: asked to save a store with no path");
+        return false;
+    }
+    const std::string& path = path_;
     std::string tmp = path + ".tmp";
     std::ofstream out(tmp, std::ios::trunc);
     if (!out) {
@@ -209,7 +214,9 @@ bool ContactStore::save(const std::string& path) {
     return true;
 }
 
-bool ContactStore::load(const std::string& path) {
+bool ContactStore::load() {
+    if (path_.empty()) return false;
+    const std::string& path = path_;
     std::ifstream in(path);
     if (!in) return false;
 

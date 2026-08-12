@@ -33,7 +33,7 @@ Channel Channel::public_channel() {
     return ch;
 }
 
-ChannelStore::ChannelStore() {
+ChannelStore::ChannelStore(std::string path) : path_(std::move(path)) {
     channels_.resize(kMaxChannels);
     channels_[0] = Channel::public_channel();
 }
@@ -60,7 +60,12 @@ std::vector<std::pair<size_t, Channel*>> ChannelStore::by_hash(uint8_t hash) {
     return out;
 }
 
-bool ChannelStore::save(const std::string& path) {
+bool ChannelStore::save() {
+    if (path_.empty()) {
+        LOG_ERROR("channels: asked to save a store with no path");
+        return false;
+    }
+    const std::string& path = path_;
     std::string tmp = path + ".tmp";
     std::ofstream out(tmp, std::ios::trunc);
     if (!out) {
@@ -94,7 +99,9 @@ bool ChannelStore::save(const std::string& path) {
     return true;
 }
 
-bool ChannelStore::load(const std::string& path) {
+bool ChannelStore::load() {
+    if (path_.empty()) return false;
+    const std::string& path = path_;
     std::ifstream in(path);
     if (!in) return false;
 

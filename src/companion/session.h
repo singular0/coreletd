@@ -4,6 +4,7 @@
 
 #include "companion/server.h"
 #include "mesh/node.h"
+#include "mesh/state_writer.h"
 #include "radio/radio.h"
 
 namespace umc::companion {
@@ -21,12 +22,10 @@ public:
     };
 
     Session(Server& server, mesh::Node& node, mesh::ContactStore& contacts,
-            mesh::ChannelStore& channels, radio::Radio& radio, DeviceInfo info);
+            mesh::ChannelStore& channels, radio::Radio& radio, mesh::StateWriter& state,
+            DeviceInfo info);
 
     void attach();
-
-    // Paths the daemon persists to; the session saves after mutating commands.
-    void set_store_paths(std::string contacts_path, std::string channels_path);
 
     // mesh::Node::Delegate
     void on_contact_changed(const mesh::Contact& c, bool is_new) override;
@@ -63,18 +62,17 @@ private:
     Bytes self_info_frame() const;
     Bytes contact_frame(uint8_t code, const mesh::Contact& c) const;
 
-    bool save_contacts();
-    bool save_channels();
+    // Reply for a command that changed persisted state: queues the write and
+    // reports whether the last one reached disk.
+    Bytes saved_reply();
 
     Server& server_;
     mesh::Node& node_;
     mesh::ContactStore& contacts_;
     mesh::ChannelStore& channels_;
     radio::Radio& radio_;
+    mesh::StateWriter& state_;
     DeviceInfo info_;
-
-    std::string contacts_path_;
-    std::string channels_path_;
 
     // Set once the app has sent CMD_APP_START. Commands before that are still
     // answered — some clients probe with DEVICE_QUERY first.

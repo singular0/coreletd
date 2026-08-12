@@ -86,13 +86,11 @@ bool App::start() {
     if (!ensure_state_dir()) return false;
     if (!load_or_create_identity()) return false;
 
-    contacts_ = std::make_unique<mesh::ContactStore>(*identity_);
-    if (!contacts_->load(cfg_.contacts_path))
-        LOG_INFO("contacts: starting with an empty store");
+    contacts_ = std::make_unique<mesh::ContactStore>(*identity_, cfg_.contacts_path);
+    if (!contacts_->load()) LOG_INFO("contacts: starting with an empty store");
 
-    channels_ = std::make_unique<mesh::ChannelStore>();
-    if (!channels_->load(cfg_.channels_path))
-        LOG_INFO("channels: using defaults (slot 0 = Public)");
+    channels_ = std::make_unique<mesh::ChannelStore>(cfg_.channels_path);
+    if (!channels_->load()) LOG_INFO("channels: using defaults (slot 0 = Public)");
 
     std::string error;
     radio_ = make_radio(error);
@@ -111,6 +109,9 @@ bool App::start() {
                                          cfg_.node);
     node_->start();
 
+    state_ = std::make_unique<mesh::StateWriter>(loop_, *contacts_, *channels_);
+    state_->start();
+
     server_ = std::make_unique<companion::Server>(loop_, cfg_.companion);
     if (!server_->start(error)) {
         LOG_ERROR("companion: %s", error.c_str());
@@ -119,16 +120,8 @@ bool App::start() {
 
     companion::Session::DeviceInfo info;
     session_ = std::make_unique<companion::Session>(*server_, *node_, *contacts_, *channels_,
-                                                    *radio_, std::move(info));
-    session_->set_store_paths(cfg_.contacts_path, cfg_.channels_path);
+                                                    *radio_, *state_, std::move(info));
     session_->attach();
-
-    // Persist stores periodically as a safety net; the session also saves
-    // immediately after any companion command that mutates them.
-    loop_.add_repeating(60000, [this] {
-        if (contacts_->dirty()) contacts_->save(cfg_.contacts_path);
-        if (channels_->dirty()) channels_->save(cfg_.channels_path);
-    });
 
     log_status();
     return true;
@@ -154,8 +147,7 @@ void App::run() { loop_.run(); }
 
 void App::request_stop() {
     LOG_INFO("shutting down");
-    if (contacts_ && contacts_->dirty()) contacts_->save(cfg_.contacts_path);
-    if (channels_ && channels_->dirty()) channels_->save(cfg_.channels_path);
+    if (state_) state_->flush();
     if (server_) server_->shutdown();
     if (radio_) radio_->shutdown();
     loop_.stop();

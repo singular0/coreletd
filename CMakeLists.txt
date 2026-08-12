@@ -56,6 +56,7 @@ add_library(umeshcore_core STATIC
     src/util/hex.cpp
     src/util/ini.cpp
     src/util/clock.cpp
+    src/util/persist.cpp
     src/crypto/crypto.cpp
     src/crypto/identity.cpp
     src/proto/packet.cpp

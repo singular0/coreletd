@@ -10,6 +10,7 @@
 
 #include "util/hex.h"
 #include "util/log.h"
+#include "util/persist.h"
 
 namespace umc::crypto {
 
@@ -116,17 +117,21 @@ std::optional<LocalIdentity> LocalIdentity::load(const std::string& path, std::s
 
 bool LocalIdentity::save(const std::string& path) const {
     std::string tmp = path + ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            LOG_ERROR("identity: cannot write %s", tmp.c_str());
-            return false;
-        }
-        out << hex(priv_) << "\n";
-        if (!out) {
-            LOG_ERROR("identity: write to %s failed", tmp.c_str());
-            return false;
-        }
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        LOG_ERROR("identity: cannot write %s", tmp.c_str());
+        return false;
+    }
+    out << hex(priv_) << "\n";
+    out.flush();
+    if (!out) {
+        LOG_ERROR("identity: write to %s failed", tmp.c_str());
+        return false;
+    }
+    out.close();
+    if (!out) {
+        LOG_ERROR("identity: close of %s failed", tmp.c_str());
+        return false;
     }
     // The private key must never be group- or world-readable.
     if (chmod(tmp.c_str(), S_IRUSR | S_IWUSR) != 0) {
@@ -134,8 +139,9 @@ bool LocalIdentity::save(const std::string& path) const {
         ::remove(tmp.c_str());
         return false;
     }
-    if (::rename(tmp.c_str(), path.c_str()) != 0) {
-        LOG_ERROR("identity: cannot rename %s -> %s", tmp.c_str(), path.c_str());
+    std::string error;
+    if (!durable_replace(tmp, path, error)) {
+        LOG_ERROR("identity: %s", error.c_str());
         ::remove(tmp.c_str());
         return false;
     }

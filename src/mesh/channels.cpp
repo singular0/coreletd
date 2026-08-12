@@ -8,6 +8,7 @@
 #include "crypto/crypto.h"
 #include "util/hex.h"
 #include "util/log.h"
+#include "util/persist.h"
 
 namespace umc::mesh {
 
@@ -74,13 +75,19 @@ bool ChannelStore::save(const std::string& path) {
             if (c == '\t' || c == '\n' || c == '\r') c = ' ';
         out << i << '\t' << hex(channels_[i].secret) << '\t' << name << '\n';
     }
-    out.close();
+    out.flush();
     if (!out) {
         LOG_ERROR("channels: write to %s failed", tmp.c_str());
         return false;
     }
-    if (::rename(tmp.c_str(), path.c_str()) != 0) {
-        LOG_ERROR("channels: cannot rename %s -> %s", tmp.c_str(), path.c_str());
+    out.close();
+    if (!out) {
+        LOG_ERROR("channels: close of %s failed", tmp.c_str());
+        return false;
+    }
+    std::string error;
+    if (!durable_replace(tmp, path, error)) {
+        LOG_ERROR("channels: %s", error.c_str());
         return false;
     }
     dirty_ = false;

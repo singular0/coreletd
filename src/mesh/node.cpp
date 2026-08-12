@@ -78,7 +78,8 @@ void Node::send_advert(bool flood) {
     dispatcher_.send(std::move(*p), kPriorityAdvert);
 }
 
-bool Node::route_packet(proto::Packet& p, const Contact& to, uint8_t priority) {
+bool Node::route_packet(proto::Packet& p, const Contact& to, uint8_t priority,
+                        Dispatcher::TxResultHandler on_result) {
     if (to.path_known) {
         p.route = proto::RouteType::Direct;
         p.path = to.out_path;
@@ -87,7 +88,7 @@ bool Node::route_packet(proto::Packet& p, const Contact& to, uint8_t priority) {
         p.route = proto::RouteType::Flood;
         p.path.clear();
     }
-    return dispatcher_.send(std::move(p), priority);
+    return dispatcher_.send(std::move(p), priority, 0, std::move(on_result));
 }
 
 std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8_t txt_type,
@@ -114,29 +115,60 @@ std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8
     proto::Packet p;
     p.type = proto::PayloadType::TxtMsg;
     p.payload = env.encode();
-    if (!route_packet(p, to, kPriorityDirect)) {
-        LOG_ERROR("send: message is too long after encryption and padding (%zu bytes)",
-                  text.size());
-        return std::nullopt;
-    }
 
-    // CLI data is never acked, so there is nothing to retry.
+    // CLI data is never acked, so there is nothing to retry. Acked messages
+    // must be registered before route_packet(): an idle radio can accept the
+    // packet synchronously and invoke the transmission callback immediately.
     if (txt_type != proto::kTxtCliData) {
         Pending pending;
         pending.ack_hash = ack_hash;
+        pending.accepted_ack_hashes.push_back(ack_hash);
         pending.dest_pubkey = to.pubkey;
         pending.text = text;
         pending.txt_type = txt_type;
         pending.timestamp = timestamp;
         pending.attempt = 0;
         pending_.push_back(std::move(pending));
-        queue_retry(ack_hash);
+    }
+
+    Dispatcher::TxResultHandler on_result;
+    if (txt_type != proto::kTxtCliData) {
+        on_result = [this, ack_hash](bool transmitted) {
+            on_tx_result(ack_hash, transmitted);
+        };
+    }
+    if (!route_packet(p, to, kPriorityDirect, std::move(on_result))) {
+        LOG_ERROR("send: message is too long after encryption and padding (%zu bytes)",
+                  text.size());
+        std::erase_if(pending_, [&](const Pending& pending) {
+            return pending.ack_hash == ack_hash;
+        });
+        return std::nullopt;
     }
 
     LOG_INFO("send: %zu bytes to %s (ack %s)", text.size(),
              to.name.empty() ? hex_prefix(to.pubkey).c_str() : to.name.c_str(),
              hex(ack_hash).c_str());
     return ack_hash;
+}
+
+void Node::on_tx_result(const Bytes& ack_hash, bool transmitted) {
+    auto it = std::find_if(pending_.begin(), pending_.end(),
+                           [&](const Pending& p) { return p.ack_hash == ack_hash; });
+    if (it == pending_.end()) return;  // acked while another callback was pending
+
+    if (transmitted) {
+        // The retry delay begins only once this attempt is genuinely on air,
+        // not while it is waiting for radio recovery or duty-cycle capacity.
+        queue_retry(ack_hash);
+        return;
+    }
+
+    LOG_WARN("send: attempt %u for %s expired before transmission",
+             it->attempt + 1, hex(ack_hash).c_str());
+    // Advance on the next event-loop pass. This avoids re-entering Dispatcher
+    // while it is in the middle of dropping an expired queue entry.
+    it->timer = loop_.add_timer(1, [this, ack_hash] { on_retry(ack_hash); });
 }
 
 void Node::queue_retry(Bytes ack_hash) {
@@ -180,7 +212,13 @@ void Node::on_retry(const Bytes& ack_hash) {
     msg.attempt = it->attempt;
     msg.text = to_bytes(it->text);
 
-    auto env = proto::DirectEnvelope::seal(to->id(), self_.pub()[0], shared, msg.encode());
+    Bytes plaintext = msg.encode();
+    ByteView ack_key =
+        it->txt_type == proto::kTxtSignedPlain ? ByteView(to->pubkey) : self_.pub();
+    Bytes retry_ack_hash = proto::message_ack_hash(plaintext, ack_key);
+    it->accepted_ack_hashes.push_back(retry_ack_hash);
+
+    auto env = proto::DirectEnvelope::seal(to->id(), self_.pub()[0], shared, plaintext);
     proto::Packet p;
     p.type = proto::PayloadType::TxtMsg;
     p.payload = env.encode();
@@ -197,9 +235,13 @@ void Node::on_retry(const Bytes& ack_hash) {
         p.path = to->out_path;
         LOG_DEBUG("send: retry %u for %s via path", it->attempt, hex(ack_hash).c_str());
     }
-    dispatcher_.send(std::move(p), kPriorityDirect);
-
-    queue_retry(ack_hash);
+    if (!dispatcher_.send(std::move(p), kPriorityDirect, 0,
+                          [this, ack_hash](bool transmitted) {
+                              on_tx_result(ack_hash, transmitted);
+                          })) {
+        LOG_ERROR("send: retry for %s could not be queued", hex(ack_hash).c_str());
+        pending_.erase(it);
+    }
 }
 
 bool Node::send_channel_text(size_t channel_index, const std::string& text, uint32_t timestamp) {
@@ -388,7 +430,10 @@ void Node::handle_ack(const proto::Packet& p) {
     ByteView ack_hash = subview(p.payload, 0, crypto::kAckHashSize);
 
     auto it = std::find_if(pending_.begin(), pending_.end(), [&](const Pending& pd) {
-        return crypto::equal(pd.ack_hash, ack_hash);
+        return std::any_of(pd.accepted_ack_hashes.begin(), pd.accepted_ack_hashes.end(),
+                           [&](const Bytes& sent_hash) {
+                               return crypto::equal(sent_hash, ack_hash);
+                           });
     });
     if (it == pending_.end()) {
         LOG_TRACE("ack: %s does not match anything pending", hex(ack_hash).c_str());
@@ -403,7 +448,9 @@ void Node::handle_ack(const proto::Packet& p) {
         c->last_seen = unix_now();
     }
 
-    Bytes hash_copy(ack_hash.begin(), ack_hash.end());
+    // Notify the companion with the original hash returned by CMD_SEND_TXT,
+    // even when a later retry's attempt-specific hash was acknowledged.
+    Bytes hash_copy = it->ack_hash;
     pending_.erase(it);
     if (delegate_) delegate_->on_ack(hash_copy);
 }

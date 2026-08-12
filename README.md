@@ -101,15 +101,15 @@ cause of a "radio not responding" report. For reference the others are GPS=27, S
 USB=23.
 
 The daemon does not switch the rail: it is shared board-level state, and whatever manages the
-uConsole's power owns it. Turn it on however you normally do, or by hand:
+uConsole's power owns it. On an AIO v2, use the board utility:
 
 ```sh
-gpioset -c gpiochip0 -t0 16=1     # libgpiod 2.x: keep it running, see below
+aiov2_ctl lora on
 ```
 
-The kernel reverts a GPIO to its default when the last process holding it exits, so whatever drives
-GPIO16 has to stay alive (`-t0` makes `gpioset` set the line and wait) — a `gpioset` that returns
-immediately leaves the rail floating, not high.
+If that utility is unavailable, `gpioset -c gpiochip0 16=1` is the manual fallback. The kernel
+reverts a GPIO to its default when the last process holding it exits, so keep `gpioset` running;
+libgpiod 2.x does that by default.
 
 Nothing breaks if you do it late. An SX1262 that does not answer is not a startup failure — the
 daemon comes up without a radio, retries every `lora_retry_interval` seconds (default 10), and

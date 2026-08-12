@@ -14,6 +14,30 @@ using namespace umc::test;
 using namespace umc::mesh;
 namespace pv = umc::pktvec;
 
+class GatedRadio final : public radio::Radio {
+public:
+    bool begin(EventLoop&, std::string&) override { return true; }
+    bool send(ByteView) override {
+        if (!ready_ || busy_) return false;
+        busy_ = true;
+        send_count_++;
+        return true;
+    }
+    bool tx_busy() const override { return busy_; }
+    bool ready() const override { return ready_; }
+    const radio::RadioParams& params() const override { return params_; }
+    std::string describe() const override { return "gated test radio"; }
+
+    void set_ready(bool ready) { ready_ = ready; }
+    size_t send_count() const { return send_count_; }
+
+private:
+    radio::RadioParams params_;
+    bool ready_ = false;
+    bool busy_ = false;
+    size_t send_count_ = 0;
+};
+
 static void test_public_channel() {
     Channel pub = Channel::public_channel();
     CHECK(pub.valid());
@@ -264,6 +288,38 @@ static void test_duty_cycle_includes_candidate_airtime() {
     CHECK(impossible.wait_ms(37) > 0);
 }
 
+static void test_dispatch_result_waits_for_actual_transmission() {
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    proto::Packet first;
+    first.type = proto::PayloadType::Ack;
+    first.payload = {1, 2, 3, 4};
+
+    bool callback_called = false;
+    bool transmitted = false;
+    CHECK(dispatcher.send(first, kPriorityDirect, 0, [&](bool sent) {
+        callback_called = true;
+        transmitted = sent;
+    }));
+    CHECK(!callback_called);
+    CHECK_EQ(dispatcher.queue_depth(), size_t {1});
+
+    // Sending another packet prompts the dispatcher to pump. The original is
+    // accepted first, and only then may its owner arm an acknowledgement timer.
+    radio.set_ready(true);
+    proto::Packet second = first;
+    second.payload[0] = 5;
+    CHECK(dispatcher.send(std::move(second), kPriorityDirect));
+    CHECK(callback_called);
+    CHECK(transmitted);
+    CHECK_EQ(radio.send_count(), size_t {1});
+    CHECK_EQ(dispatcher.queue_depth(), size_t {1});
+}
+
 int main() {
     if (!crypto::init()) return 2;
 
@@ -278,6 +334,7 @@ int main() {
     test_oversized_encrypted_messages_are_rejected();
     test_failed_store_saves_remain_dirty();
     test_duty_cycle_includes_candidate_airtime();
+    test_dispatch_result_waits_for_actual_transmission();
 
     return finish("mesh");
 }

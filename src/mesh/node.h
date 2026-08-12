@@ -108,12 +108,19 @@ private:
 
     void queue_retry(Bytes ack_hash);
     void on_retry(const Bytes& ack_hash);
+    void on_tx_result(const Bytes& ack_hash, bool transmitted);
 
     proto::AdvertAppData build_appdata() const;
-    bool route_packet(proto::Packet& p, const Contact& to, uint8_t priority);
+    bool route_packet(proto::Packet& p, const Contact& to, uint8_t priority,
+                      Dispatcher::TxResultHandler on_result = {});
 
     struct Pending {
+        // The first hash is what the companion client was told to wait for.
+        // Retries change the attempt bits in the plaintext and therefore have
+        // different on-air ack hashes; keep all transmitted hashes so a late
+        // or bundled ack for any attempt can complete the original send.
         Bytes ack_hash;
+        std::vector<Bytes> accepted_ack_hashes;
         Bytes dest_pubkey;
         std::string text;
         uint8_t txt_type = proto::kTxtPlain;

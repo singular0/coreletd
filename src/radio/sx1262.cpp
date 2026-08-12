@@ -250,6 +250,20 @@ bool Sx1262::reset_chip(std::string& error) {
         error = "SX1262 did not release BUSY after reset — check the wiring";
         return false;
     }
+
+    // The SX126x can reject the first few commands after reset even though
+    // BUSY is already low.  Wake it into RC standby before attempting a
+    // register read; otherwise repeatedly resetting after the rejected probe
+    // guarantees that every probe is the first command after a reset.
+    const uint32_t deadline = millis() + 1000;
+    const uint8_t standby = kStandbyRc;
+    while (!cmd(kCmdSetStandby, ByteView(&standby, 1))) {
+        if (static_cast<int32_t>(millis() - deadline) >= 0) {
+            error = "SX1262 did not accept standby after reset — check the wiring";
+            return false;
+        }
+        sleep_ms(10);
+    }
     return true;
 }
 
@@ -379,6 +393,22 @@ void Sx1262::poll_reset_busy() {
     if (busy > 0) {
         if (static_cast<int32_t>(millis() - recovery_deadline_ms_) >= 0) {
             recovery_failed("SX1262 did not release BUSY after reset — check the wiring");
+            return;
+        }
+        recovery_timer_ = loop_->add_timer(10, [this] {
+            recovery_timer_ = 0;
+            poll_reset_busy();
+        });
+        return;
+    }
+
+    // BUSY going low does not mean the first command will be accepted.  The
+    // chip commonly returns command-failed for a short time after reset, so
+    // retry RC standby without resetting it again.
+    const uint8_t standby = kStandbyRc;
+    if (!cmd(kCmdSetStandby, ByteView(&standby, 1))) {
+        if (static_cast<int32_t>(millis() - recovery_deadline_ms_) >= 0) {
+            recovery_failed("SX1262 did not accept standby after reset — check the wiring");
             return;
         }
         recovery_timer_ = loop_->add_timer(10, [this] {

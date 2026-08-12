@@ -43,6 +43,9 @@ public:
     // Called for every packet received, before dedup — the companion app wants
     // to see repeats to compute hop counts and populate its Discover list.
     using RawRxHandler = std::function<void(const proto::Packet&, ByteView raw)>;
+    // Called exactly once for a queued packet: true after the radio accepts it
+    // for transmission, false if it expires or is otherwise dropped first.
+    using TxResultHandler = std::function<void(bool transmitted)>;
 
     Dispatcher(EventLoop& loop, radio::Radio& radio);
 
@@ -55,7 +58,8 @@ public:
     // stagger flood repeats so nearby nodes do not collide.
     // Returns false without queueing when the packet cannot be represented on
     // the wire. Callers that report command success must check this result.
-    bool send(proto::Packet p, uint8_t priority, uint32_t delay_ms = 0);
+    bool send(proto::Packet p, uint8_t priority, uint32_t delay_ms = 0,
+              TxResultHandler on_result = {});
 
     // True if this packet was already seen recently; records it either way.
     bool check_and_mark_seen(const proto::Packet& p);
@@ -72,6 +76,7 @@ private:
         uint32_t expiry_ms;
         uint32_t not_before_ms;
         uint64_t seq;
+        TxResultHandler on_result;
     };
 
     void on_radio_rx(radio::RxPacket&& rx);

@@ -104,7 +104,8 @@ void Dispatcher::expire_seen() {
     });
 }
 
-bool Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms) {
+bool Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms,
+                      TxResultHandler on_result) {
     if (!p.valid()) {
         LOG_ERROR("tx: refusing invalid packet: %s", p.describe().c_str());
         stats_.tx_dropped++;
@@ -118,7 +119,7 @@ bool Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms) {
     check_and_mark_seen(p);
 
     Queued q {std::move(p), priority, now + kExpiryPerPriorityMs * priority,
-              now + delay_ms, next_seq_++};
+              now + delay_ms, next_seq_++, std::move(on_result)};
 
     // Insert by (priority, expiry) so equal priorities go out in the order they
     // will time out, which is FIFO for packets queued together.
@@ -151,8 +152,10 @@ void Dispatcher::pump() {
     // Drop anything that expired while waiting.
     while (!queue_.empty() && static_cast<int32_t>(queue_.front().expiry_ms - now) <= 0) {
         LOG_DEBUG("tx: dropping expired %s", queue_.front().packet.describe().c_str());
+        Queued dropped = std::move(queue_.front());
         queue_.pop_front();
         stats_.tx_dropped++;
+        if (dropped.on_result) dropped.on_result(false);
     }
     if (queue_.empty()) return;
 
@@ -192,6 +195,7 @@ void Dispatcher::pump() {
         LOG_ERROR("tx: refusing oversized packet (%zu bytes): %s", raw.size(),
                   q.packet.describe().c_str());
         stats_.tx_dropped++;
+        if (q.on_result) q.on_result(false);
         pump();
         return;
     }
@@ -210,6 +214,7 @@ void Dispatcher::pump() {
         stats_.tx_direct++;
     }
     LOG_DEBUG("tx: %s", q.packet.describe().c_str());
+    if (q.on_result) q.on_result(true);
 }
 
 void Dispatcher::on_radio_tx_done(uint32_t airtime_ms) {

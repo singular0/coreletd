@@ -39,6 +39,8 @@ struct DispatcherStats {
 // Handles deduplication, the priority transmit queue, and duty-cycle pacing.
 class Dispatcher {
 public:
+    static constexpr size_t kDefaultQueueLimit = 128;
+
     using RxHandler = std::function<void(proto::Packet&&)>;
     // Called for every packet received, before dedup — the companion app wants
     // to see repeats to compute hop counts and populate its Discover list.
@@ -47,7 +49,8 @@ public:
     // for transmission, false if it expires or is otherwise dropped first.
     using TxResultHandler = std::function<void(bool transmitted)>;
 
-    Dispatcher(EventLoop& loop, radio::Radio& radio);
+    Dispatcher(EventLoop& loop, radio::Radio& radio,
+               size_t queue_limit = kDefaultQueueLimit);
 
     void set_rx_handler(RxHandler h) { on_rx_ = std::move(h); }
     void set_raw_rx_handler(RawRxHandler h) { on_raw_rx_ = std::move(h); }
@@ -90,6 +93,7 @@ private:
     radio::DutyCycle duty_;
 
     std::deque<Queued> queue_;
+    size_t queue_limit_;
     uint64_t next_seq_ = 0;
     EventLoop::TimerId pump_timer_ = 0;
     uint32_t pump_due_ms_ = 0;

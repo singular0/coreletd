@@ -37,13 +37,14 @@ std::vector<Contact*> ContactStore::by_id(uint8_t id) {
     return out;
 }
 
-Contact& ContactStore::upsert(ByteView pubkey) {
-    if (Contact* existing = find(pubkey)) return *existing;
+Contact* ContactStore::upsert(ByteView pubkey) {
+    if (Contact* existing = find(pubkey)) return existing;
+    if (contacts_.size() >= max_contacts_) return nullptr;
     Contact c;
     c.pubkey.assign(pubkey.begin(), pubkey.end());
     contacts_.push_back(std::move(c));
     dirty_ = true;
-    return contacts_.back();
+    return &contacts_.back();
 }
 
 Contact* ContactStore::apply_advert(const proto::Advert& adv, const proto::AdvertAppData& app,
@@ -59,26 +60,31 @@ Contact* ContactStore::apply_advert(const proto::Advert& adv, const proto::Adver
         return nullptr;
     }
 
-    Contact& c = existing ? *existing : upsert(adv.pubkey);
+    Contact* c = existing ? existing : upsert(adv.pubkey);
+    if (!c) {
+        LOG_WARN("contacts: limit reached, ignoring advert from %s",
+                 hex_prefix(adv.pubkey).c_str());
+        return nullptr;
+    }
     created = existing == nullptr;
 
-    c.adv_timestamp = adv.timestamp;
-    c.last_seen = unix_now();
-    c.type = app.node_type();
-    c.flags = app.flags;
-    if (app.has_name()) c.name = app.name;
+    c->adv_timestamp = adv.timestamp;
+    c->last_seen = unix_now();
+    c->type = app.node_type();
+    c->flags = app.flags;
+    if (app.has_name()) c->name = app.name;
     if (app.has_location()) {
-        c.lat_e6 = app.lat_e6;
-        c.lon_e6 = app.lon_e6;
+        c->lat_e6 = app.lat_e6;
+        c->lon_e6 = app.lon_e6;
     }
 
     // Warm the ECDH cache here rather than on the receive path: deriving the
     // shared secret costs a scalar multiplication, and an advert is a much
     // better moment to pay for it than the arrival of a message.
-    c.shared_secret(self_);
+    c->shared_secret(self_);
 
     dirty_ = true;
-    return &c;
+    return c;
 }
 
 bool ContactStore::remove(ByteView pubkey) {
@@ -176,6 +182,10 @@ bool ContactStore::load(const std::string& path) {
                 c.out_path = std::move(*p);
                 c.path_known = true;
             }
+        }
+        if (contacts_.size() >= max_contacts_) {
+            LOG_ERROR("contacts: %s exceeds limit of %zu", path.c_str(), max_contacts_);
+            return false;
         }
         contacts_.push_back(std::move(c));
     }

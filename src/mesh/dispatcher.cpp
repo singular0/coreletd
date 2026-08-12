@@ -1,6 +1,7 @@
 #include "mesh/dispatcher.h"
 
 #include <algorithm>
+#include <iterator>
 
 #include "crypto/crypto.h"
 #include "util/clock.h"
@@ -34,8 +35,11 @@ uint32_t pack_hash(ByteView h) {
 }
 }  // namespace
 
-Dispatcher::Dispatcher(EventLoop& loop, radio::Radio& radio)
-    : loop_(loop), radio_(radio), duty_(radio.params().duty_cycle_pct) {}
+Dispatcher::Dispatcher(EventLoop& loop, radio::Radio& radio, size_t queue_limit)
+    : loop_(loop),
+      radio_(radio),
+      duty_(radio.params().duty_cycle_pct),
+      queue_limit_(std::max<size_t>(queue_limit, 1)) {}
 
 bool Dispatcher::start(std::string& error) {
     radio_.set_rx_handler([this](radio::RxPacket&& rx) { on_radio_rx(std::move(rx)); });
@@ -128,7 +132,26 @@ bool Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms,
         if (a.expiry_ms != b.expiry_ms) return static_cast<int32_t>(a.expiry_ms - b.expiry_ms) < 0;
         return a.seq < b.seq;
     });
+    uint64_t inserted_seq = q.seq;
     queue_.insert(pos, std::move(q));
+
+    if (queue_.size() > queue_limit_) {
+        // Preserve urgent traffic. Within the least-urgent priority, discard
+        // the oldest entry because it is also closest to expiry.
+        auto victim = queue_.begin();
+        for (auto it = std::next(queue_.begin()); it != queue_.end(); ++it) {
+            if (it->priority > victim->priority ||
+                (it->priority == victim->priority && it->seq < victim->seq))
+                victim = it;
+        }
+        bool rejected_new = victim->seq == inserted_seq;
+        LOG_WARN("tx: queue full, dropping %s%s", victim->packet.describe().c_str(),
+                 rejected_new ? " (new packet)" : "");
+        Queued dropped = std::move(*victim);
+        queue_.erase(victim);
+        stats_.tx_dropped++;
+        if (dropped.on_result) dropped.on_result(false);
+    }
 
     pump();
     return true;

@@ -47,7 +47,11 @@ private:
 
 class ContactStore {
 public:
-    explicit ContactStore(const crypto::LocalIdentity& self) : self_(self) {}
+    static constexpr size_t kMaxContacts = 100;
+
+    explicit ContactStore(const crypto::LocalIdentity& self,
+                          size_t max_contacts = kMaxContacts)
+        : self_(self), max_contacts_(max_contacts) {}
 
     Contact* find(ByteView pubkey);
     const Contact* find(ByteView pubkey) const;
@@ -62,7 +66,9 @@ public:
     Contact* apply_advert(const proto::Advert& adv, const proto::AdvertAppData& app,
                           bool& created);
 
-    Contact& upsert(ByteView pubkey);
+    // Returns nullptr when a new contact would exceed the store limit. An
+    // existing contact is always returned so it can still be updated.
+    Contact* upsert(ByteView pubkey);
     bool remove(ByteView pubkey);
 
     std::vector<Contact>& all() { return contacts_; }
@@ -79,6 +85,7 @@ public:
 
 private:
     const crypto::LocalIdentity& self_;
+    size_t max_contacts_;
     std::vector<Contact> contacts_;
     bool dirty_ = false;
 };

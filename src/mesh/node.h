@@ -39,6 +39,7 @@ public:
         bool repeat = false;
         uint8_t max_hops = 32;
         uint32_t message_queue_limit = 256;
+        uint32_t pending_send_limit = 64;
     };
 
     // Notifications for whatever is driving the node (the companion session).

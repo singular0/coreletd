@@ -9,6 +9,9 @@
 
 namespace umc::companion {
 
+// Overflow-safe capacity check shared with the transport regression tests.
+bool outbound_buffer_has_capacity(size_t buffered, size_t next, size_t limit);
+
 // TCP transport for the companion protocol. The firmware model is a single
 // connected app, so a new connection replaces the old one rather than being
 // refused — otherwise a crashed client would lock everyone out until the TCP
@@ -18,6 +21,8 @@ public:
     struct Options {
         std::string bind_addr = "127.0.0.1";
         uint16_t port = 5000;
+        // A client that cannot drain this much queued output is disconnected.
+        size_t max_outbound_bytes = 256 * 1024;
     };
 
     using FrameHandler = std::function<void(ByteView frame)>;

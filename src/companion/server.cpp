@@ -14,6 +14,10 @@
 
 namespace umc::companion {
 
+bool outbound_buffer_has_capacity(size_t buffered, size_t next, size_t limit) {
+    return buffered <= limit && next <= limit - buffered;
+}
+
 namespace {
 bool set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -185,6 +189,11 @@ void Server::send(ByteView payload) {
 
     Bytes framed = frame_response(payload);
     LOG_TRACE("companion: tx %zu bytes: %s", framed.size(), hex_prefix(framed, 16).c_str());
+    if (!outbound_buffer_has_capacity(out_buf_.size(), framed.size(),
+                                      opts_.max_outbound_bytes)) {
+        drop_client("outbound buffer limit exceeded");
+        return;
+    }
     out_buf_.insert(out_buf_.end(), framed.begin(), framed.end());
     flush();
 }

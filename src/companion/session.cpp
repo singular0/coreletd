@@ -252,37 +252,38 @@ Bytes Session::cmd_add_update_contact(ByteView args) {
 
     if (path_len != kNoPath && args.size() < 35u + path_len) return resp_err(kErrIllegalArg);
 
-    mesh::Contact& c = contacts_.upsert(pubkey);
-    c.type = type;
-    c.flags = flags;
+    mesh::Contact* c = contacts_.upsert(pubkey);
+    if (!c) return resp_err(kErrTableFull);
+    c->type = type;
+    c->flags = flags;
 
     size_t off = 35;
     if (path_len == kNoPath) {
-        c.path_known = false;
-        c.out_path.clear();
+        c->path_known = false;
+        c->out_path.clear();
     } else {
-        c.out_path.assign(args.begin() + off, args.begin() + off + path_len);
-        c.path_known = true;
+        c->out_path.assign(args.begin() + off, args.begin() + off + path_len);
+        c->path_known = true;
         off += path_len;
     }
 
     if (args.size() >= off + kContactNameField) {
-        c.name = rd_fixed_str(args, off, kContactNameField);
+        c->name = rd_fixed_str(args, off, kContactNameField);
         off += kContactNameField;
     }
     if (args.size() >= off + 4) {
-        c.adv_timestamp = rd_u32(args, off);
+        c->adv_timestamp = rd_u32(args, off);
         off += 4;
     }
     if (args.size() >= off + 8) {
-        c.lat_e6 = rd_i32(args, off);
-        c.lon_e6 = rd_i32(args, off + 4);
+        c->lat_e6 = rd_i32(args, off);
+        c->lon_e6 = rd_i32(args, off + 4);
     }
 
     contacts_.mark_dirty();
     if (!save_contacts()) return resp_err(kErrFileIoError);
-    LOG_INFO("companion: contact %s (%s) added/updated", hex_prefix(c.pubkey).c_str(),
-             c.name.c_str());
+    LOG_INFO("companion: contact %s (%s) added/updated", hex_prefix(c->pubkey).c_str(),
+             c->name.c_str());
     return resp_ok();
 }
 

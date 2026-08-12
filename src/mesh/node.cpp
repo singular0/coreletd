@@ -126,6 +126,11 @@ std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8
         }
     }
 
+    if (txt_type != proto::kTxtCliData && pending_.size() >= cfg_.pending_send_limit) {
+        LOG_WARN("send: pending message limit reached (%u)", cfg_.pending_send_limit);
+        return std::nullopt;
+    }
+
     auto env = proto::DirectEnvelope::seal(to.id(), self_.pub()[0], shared, plaintext);
     proto::Packet p;
     p.type = proto::PayloadType::TxtMsg;

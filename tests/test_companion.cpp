@@ -1,4 +1,5 @@
 #include "companion/frames.h"
+#include "companion/server.h"
 #include "tests/test_util.h"
 
 using namespace umc;
@@ -121,6 +122,14 @@ static void test_response_helpers() {
     CHECK_EQ(rd_u32(ok_val, 1), uint32_t {0x12345678});
 }
 
+static void test_outbound_buffer_limit_is_overflow_safe() {
+    CHECK(outbound_buffer_has_capacity(0, 8, 8));
+    CHECK(outbound_buffer_has_capacity(3, 5, 8));
+    CHECK(!outbound_buffer_has_capacity(3, 6, 8));
+    CHECK(!outbound_buffer_has_capacity(9, 0, 8));
+    CHECK(!outbound_buffer_has_capacity(size_t(-2), 4, size_t(-1)));
+}
+
 int main() {
     test_single_frame();
     test_split_across_reads();
@@ -130,5 +139,6 @@ int main() {
     test_oversized_length_resyncs();
     test_response_framing();
     test_response_helpers();
+    test_outbound_buffer_limit_is_overflow_safe();
     return finish("companion");
 }

@@ -95,7 +95,7 @@ static void test_contact_store_roundtrip() {
     ContactStore store(*self);
     Bytes pub_b = from_hex(pv::kPubB);
 
-    Contact& c = store.upsert(pub_b);
+    Contact& c = *store.upsert(pub_b);
     c.name = "Peer";
     c.type = proto::kAdvTypeRepeater;
     c.adv_timestamp = pv::kFixedTime;
@@ -136,12 +136,12 @@ static void test_contact_flood_vs_zero_hop_path_survives_reload() {
     Bytes pub_a = from_hex(pv::kPubA);
 
     // Zero-hop direct neighbour: empty path but path_known.
-    Contact& direct = store.upsert(pub_b);
+    Contact& direct = *store.upsert(pub_b);
     direct.path_known = true;
     direct.out_path.clear();
 
     // Route unknown: must flood.
-    Contact& flood = store.upsert(pub_a);
+    Contact& flood = *store.upsert(pub_a);
     flood.path_known = false;
 
     const std::string path = "/tmp/umeshcore_test_contacts2";
@@ -204,7 +204,7 @@ static void test_shared_secret_is_cached_and_symmetric() {
     if (!a || !b) return;
 
     ContactStore store_a(*a);
-    Contact& contact_b = store_a.upsert(from_hex(pv::kPubB));
+    Contact& contact_b = *store_a.upsert(from_hex(pv::kPubB));
 
     const Bytes& s1 = contact_b.shared_secret(*a);
     const Bytes& s2 = contact_b.shared_secret(*a);
@@ -212,7 +212,7 @@ static void test_shared_secret_is_cached_and_symmetric() {
     CHECK_BYTES(s1, s2);
 
     ContactStore store_b(*b);
-    Contact& contact_a = store_b.upsert(from_hex(pv::kPubA));
+    Contact& contact_a = *store_b.upsert(from_hex(pv::kPubA));
     CHECK_BYTES(contact_a.shared_secret(*b), s1);
 }
 
@@ -238,7 +238,7 @@ static void test_oversized_encrypted_messages_are_rejected() {
     if (!self) return;
 
     ContactStore contacts(*self);
-    Contact& peer = contacts.upsert(from_hex(pv::kPubB));
+    Contact& peer = *contacts.upsert(from_hex(pv::kPubB));
     ChannelStore channels;
     EventLoop loop;
     radio::RadioParams params;
@@ -329,7 +329,7 @@ static void test_identical_pending_messages_are_coalesced() {
     if (!self) return;
 
     ContactStore contacts(*self);
-    Contact& peer = contacts.upsert(from_hex(pv::kPubB));
+    Contact& peer = *contacts.upsert(from_hex(pv::kPubB));
     ChannelStore channels;
     EventLoop loop;
     GatedRadio radio;
@@ -377,6 +377,67 @@ static void test_earlier_pump_replaces_later_timer() {
     CHECK_EQ(radio.send_count(), size_t {2});
 }
 
+static void test_dispatch_queue_drops_lowest_priority() {
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio, 2);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    proto::Packet packet;
+    packet.type = proto::PayloadType::Ack;
+    packet.payload = {1, 2, 3, 4};
+
+    bool low_dropped = false;
+    bool urgent_dropped = false;
+    CHECK(dispatcher.send(packet, kPriorityAdvert, 0,
+                          [&](bool sent) { low_dropped = !sent; }));
+    packet.payload[0] = 2;
+    CHECK(dispatcher.send(packet, kPriorityAck, 0,
+                          [&](bool sent) { urgent_dropped = !sent; }));
+    packet.payload[0] = 3;
+    CHECK(dispatcher.send(packet, kPriorityDirect));
+
+    CHECK_EQ(dispatcher.queue_depth(), size_t {2});
+    CHECK(low_dropped);
+    CHECK(!urgent_dropped);
+    CHECK_EQ(dispatcher.stats().tx_dropped, uint32_t {1});
+}
+
+static void test_pending_send_limit_rejects_new_message() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore contacts(*self);
+    Contact& peer = *contacts.upsert(from_hex(pv::kPubB));
+    ChannelStore channels;
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    Node::Config cfg;
+    cfg.pending_send_limit = 1;
+    Node node(loop, dispatcher, *self, contacts, channels, cfg);
+    CHECK(node.send_text(peer, "first", proto::kTxtPlain, pv::kFixedTime).has_value());
+    CHECK(!node.send_text(peer, "second", proto::kTxtPlain, pv::kFixedTime + 1).has_value());
+    CHECK_EQ(dispatcher.queue_depth(), size_t {1});
+}
+
+static void test_contact_limit_rejects_new_but_allows_update() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore contacts(*self, 1);
+    Bytes first_key = from_hex(pv::kPubB);
+    Contact* first = contacts.upsert(first_key);
+    CHECK(first != nullptr);
+    CHECK(contacts.upsert(from_hex(pv::kPubA)) == nullptr);
+    CHECK(contacts.upsert(first_key) == first);
+    CHECK_EQ(contacts.size(), size_t {1});
+}
+
 int main() {
     if (!crypto::init()) return 2;
 
@@ -394,6 +455,9 @@ int main() {
     test_dispatch_result_waits_for_actual_transmission();
     test_identical_pending_messages_are_coalesced();
     test_earlier_pump_replaces_later_timer();
+    test_dispatch_queue_drops_lowest_priority();
+    test_pending_send_limit_rejects_new_message();
+    test_contact_limit_rejects_new_but_allows_update();
 
     return finish("mesh");
 }

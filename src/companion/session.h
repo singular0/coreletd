@@ -16,7 +16,7 @@ public:
         std::string model = "uConsole AIO v2";
         std::string firmware_build = UMESHCORE_VERSION;
         std::string version = UMESHCORE_VERSION;
-        uint8_t max_contacts_div2 = 50;  // reported as value * 2
+        uint8_t max_contacts_div2 = mesh::ContactStore::kMaxContacts / 2;
         uint8_t max_channels = mesh::ChannelStore::kMaxChannels;
     };
 

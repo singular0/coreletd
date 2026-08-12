@@ -66,9 +66,8 @@ std::unique_ptr<radio::Radio> App::make_radio(std::string& error) {
     pins.nss = cfg_.spi.nss_pin;
     pins.rxen = cfg_.spi.rxen_pin;
     pins.txen = cfg_.spi.txen_pin;
-    pins.power_enable = cfg_.spi.power_enable_pin;
     pins.spi_speed_hz = cfg_.spi.spi_speed_hz;
-    return std::make_unique<radio::Sx1262>(cfg_.radio, pins);
+    return std::make_unique<radio::Sx1262>(cfg_.radio, pins, cfg_.spi.retry_interval_s * 1000);
 #else
     error =
         "this build has no SX1262 backend (built without libgpiod). "

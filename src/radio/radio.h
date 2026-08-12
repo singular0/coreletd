@@ -48,6 +48,11 @@ public:
     virtual bool send(ByteView data) = 0;
     virtual bool tx_busy() const = 0;
 
+    // False while the hardware is unusable. begin() succeeding does not imply
+    // this: a driver whose chip is unpowered comes up not-ready and goes ready
+    // once the chip turns up. Nothing is transmitted while it is false.
+    virtual bool ready() const { return true; }
+
     virtual const RadioParams& params() const = 0;
     virtual std::string describe() const = 0;
 

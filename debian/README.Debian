@@ -32,7 +32,12 @@ Before the first start
    Confirm /dev/spidev1.0 exists afterwards. The unit has
    ConditionPathExists=/dev/spidev1.0 and will refuse to start without it.
 
-2. Stop meshtasticd if it is installed -- it holds the same GPIO lines and
+2. Turn on the LoRa power rail (GPIO16). The daemon does not switch it -- it
+   is board-level state owned by whatever manages the uConsole's power. Until
+   it is high the SX1262 is unpowered; the daemon starts anyway and connects
+   to the radio on its next retry (lora_retry_interval, 10 seconds).
+
+3. Stop meshtasticd if it is installed -- it holds the same GPIO lines and
    umeshcored will fail with EBUSY.
 
 The package creates a system user `umeshcore` and a system group `meshcore`.

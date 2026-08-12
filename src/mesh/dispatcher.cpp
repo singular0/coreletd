@@ -23,6 +23,10 @@ constexpr uint32_t kExpiryPerPriorityMs = 10000;
 // repeat it in the same instant.
 constexpr uint32_t kJitterMs = 400;
 
+// How often to look again when the radio is down. Anything still queued when it
+// comes back goes out; anything that expired meanwhile was already dropped.
+constexpr uint32_t kRadioDownRecheckMs = 1000;
+
 uint32_t pack_hash(ByteView h) {
     uint32_t v = 0;
     for (size_t i = 0; i < 4 && i < h.size(); i++) v |= static_cast<uint32_t>(h[i]) << (i * 8);
@@ -144,6 +148,13 @@ void Dispatcher::pump() {
         stats_.tx_dropped++;
     }
     if (queue_.empty()) return;
+
+    // Hold everything while the radio is down (an unpowered chip waiting to be
+    // retried, say) rather than hammering send() with nothing to send it to.
+    if (!radio_.ready()) {
+        schedule_pump(kRadioDownRecheckMs);
+        return;
+    }
 
     // Respect the regulatory duty cycle before anything else.
     if (uint32_t wait = duty_.wait_ms(); wait > 0) {

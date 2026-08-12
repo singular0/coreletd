@@ -19,10 +19,13 @@ struct SpiConfig {
     int nss_pin = -1;    // -1 == chip select driven by the SPI controller
     int rxen_pin = -1;
     int txen_pin = -1;
-    // AIO v2 gates power to each subsystem; the LoRa rail must be enabled
-    // before the SX1262 will respond at all.
-    int power_enable_pin = 16;
     uint32_t spi_speed_hz = 2000000;
+    // The AIO v2 gates power to each subsystem and the daemon does not touch
+    // those switches, so the SX1262 may be absent at startup or vanish while
+    // running. Seconds between attempts to (re)connect to it, and between the
+    // liveness checks that notice it going away. 0 disables both, making an
+    // unresponsive radio a startup failure again.
+    uint32_t retry_interval_s = 10;
 };
 
 struct Config {

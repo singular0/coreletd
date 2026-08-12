@@ -96,10 +96,25 @@ dtoverlay=spi1-1cs
 Confirm `/dev/spidev1.0` exists afterwards.
 
 **2. The LoRa power rail.** The AIO v2 gates power to each subsystem behind a GPIO. **GPIO16 must be
-driven high or the SX1262 is unpowered** and every SPI read returns zeroes. The daemon does this
-itself at startup (`lora_power_enable_pin = 16`); it is called out here because it is the single
-most likely cause of a "radio not responding" report. For reference the others are GPS=27, SDR=7,
-internal USB=23.
+driven high or the SX1262 is unpowered** and every SPI read returns zeroes — the single most likely
+cause of a "radio not responding" report. For reference the others are GPS=27, SDR=7, internal
+USB=23.
+
+The daemon does not switch the rail: it is shared board-level state, and whatever manages the
+uConsole's power owns it. Turn it on however you normally do, or by hand:
+
+```sh
+gpioset -c gpiochip0 -t0 16=1     # libgpiod 2.x: keep it running, see below
+```
+
+The kernel reverts a GPIO to its default when the last process holding it exits, so whatever drives
+GPIO16 has to stay alive (`-t0` makes `gpioset` set the line and wait) — a `gpioset` that returns
+immediately leaves the rail floating, not high.
+
+Nothing breaks if you do it late. An SX1262 that does not answer is not a startup failure — the
+daemon comes up without a radio, retries every `lora_retry_interval` seconds (default 10), and
+starts receiving as soon as the chip appears. The same check runs while the radio is up, so cutting
+the rail mid-session logs a warning, holds the transmit queue, and reconnects once power is back.
 
 **3. Fit an antenna before transmitting.** Running a 22 dBm PA into an open connector will damage it.
 

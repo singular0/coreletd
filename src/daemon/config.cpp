@@ -90,9 +90,14 @@ bool Config::load(const std::string& path, std::string& error) {
     spi.nss_pin = static_cast<int>(ini.get_int("lora_nss_pin", spi.nss_pin));
     spi.rxen_pin = static_cast<int>(ini.get_int("lora_rxen_pin", spi.rxen_pin));
     spi.txen_pin = static_cast<int>(ini.get_int("lora_txen_pin", spi.txen_pin));
-    spi.power_enable_pin =
-        static_cast<int>(ini.get_int("lora_power_enable_pin", spi.power_enable_pin));
     spi.spi_speed_hz = static_cast<uint32_t>(ini.get_int("spi_speed", spi.spi_speed_hz));
+
+    long retry_s = ini.get_int("lora_retry_interval", spi.retry_interval_s);
+    if (retry_s < 0 || retry_s > 86400) {
+        error = "lora_retry_interval must be between 0 and 86400 seconds (0 disables retrying)";
+        return false;
+    }
+    spi.retry_interval_s = static_cast<uint32_t>(retry_s);
 
     // --- node ---
     node.name = ini.get_str("advert_name", node.name);

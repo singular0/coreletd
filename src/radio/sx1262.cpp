@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <string_view>
 #include <thread>
 
 #include "util/clock.h"
@@ -45,6 +46,7 @@ constexpr uint8_t kCmdClearDeviceErrors = 0x07;
 constexpr uint8_t kCmdSetRxTxFallbackMode = 0x93;
 
 // Registers
+constexpr uint16_t kRegVersionString = 0x0320;  // "SX1261"/"SX1262"/"SX1268"
 constexpr uint16_t kRegLoRaSyncWordMsb = 0x0740;
 constexpr uint16_t kRegRxGain = 0x08AC;
 constexpr uint16_t kRegOcpConfig = 0x08E7;
@@ -86,7 +88,8 @@ uint8_t bw_code(double khz) {
 
 }  // namespace
 
-Sx1262::Sx1262(RadioParams params, Pins pins) : params_(params), pins_(std::move(pins)) {}
+Sx1262::Sx1262(RadioParams params, Pins pins, uint32_t retry_interval_ms)
+    : params_(params), pins_(std::move(pins)), retry_interval_ms_(retry_interval_ms) {}
 
 Sx1262::~Sx1262() { shutdown(); }
 
@@ -102,7 +105,13 @@ bool Sx1262::wait_busy(uint32_t timeout_ms) {
         if (v == 0) return true;
         if (v < 0) return false;
         if (millis() - start > timeout_ms) {
-            LOG_ERROR("sx1262: BUSY stuck high for %u ms", timeout_ms);
+            // While the radio is down this is just a retry poking at a chip
+            // that is not there; only a working radio going quiet is news.
+            if (healthy_) {
+                LOG_ERROR("sx1262: BUSY stuck high for %u ms", timeout_ms);
+            } else {
+                LOG_DEBUG("sx1262: BUSY stuck high for %u ms", timeout_ms);
+            }
             return false;
         }
         // The chip clears BUSY within microseconds for most commands; a short
@@ -212,11 +221,37 @@ bool Sx1262::reset_chip(std::string& error) {
     sleep_ms(20);
 
     if (!wait_busy(1000)) {
-        error =
-            "SX1262 did not release BUSY after reset — check wiring, and that the LoRa "
-            "power rail (lora_power_enable_pin) is enabled";
+        error = "SX1262 did not release BUSY after reset — check the wiring";
         return false;
     }
+    return true;
+}
+
+bool Sx1262::chip_responding() {
+    // The part number lives in six registers at 0x0320. An unpowered chip does
+    // not drive MISO at all, so the read "succeeds" and comes back as 0x00s (or
+    // 0xFFs) — which is exactly how a switched-off LoRa rail looks from here.
+    uint8_t version[6] = {0};
+    if (!read_register(kRegVersionString, version)) return false;
+    return std::string_view(reinterpret_cast<const char*>(version), 5) == "SX126";
+}
+
+bool Sx1262::bring_up(std::string& error) {
+    if (!reset_chip(error)) return false;
+
+    if (!chip_responding()) {
+        error = "SX1262 is not answering — the LoRa power rail is most likely off";
+        return false;
+    }
+
+    if (!configure(error)) return false;
+
+    if (!set_rx_mode()) {
+        error = "could not put the radio into receive mode";
+        return false;
+    }
+
+    healthy_ = true;
     return true;
 }
 
@@ -225,15 +260,6 @@ bool Sx1262::begin(EventLoop& loop, std::string& error) {
 
     if (!spi_.open(pins_.spidev, pins_.spi_speed_hz, error)) return false;
     if (!chip_.open(pins_.gpiochip, error)) return false;
-
-    // Power the LoRa section first: on the AIO v2 the SX1262 is unpowered until
-    // GPIO16 goes high, and every SPI read would come back as 0x00.
-    if (pins_.power_enable >= 0) {
-        power_line_ = chip_.request_output(pins_.power_enable, true, error);
-        if (!power_line_) return false;
-        LOG_DEBUG("sx1262: LoRa power enabled on GPIO%d", pins_.power_enable);
-        sleep_ms(50);
-    }
 
     if (pins_.reset < 0 || pins_.busy < 0 || pins_.irq < 0) {
         error = "lora_reset_pin, lora_busy_pin and lora_irq_pin are all required";
@@ -260,19 +286,59 @@ bool Sx1262::begin(EventLoop& loop, std::string& error) {
         if (!txen_line_) return false;
     }
 
-    if (!reset_chip(error)) return false;
-    if (!configure(error)) return false;
-
+    // The IRQ line belongs to the SoC, not to the module, so this watch stays
+    // valid across a chip that comes and goes; on_irq() ignores edges while the
+    // radio is down.
     irq_watch_ = loop.add_fd(irq_line_->fd(), POLLIN, [this](short) { on_irq(); });
 
-    if (!set_rx_mode()) {
-        error = "could not put the radio into receive mode";
-        return false;
+    if (bring_up(error)) {
+        LOG_INFO("sx1262: %s", describe().c_str());
+    } else {
+        if (retry_interval_ms_ == 0) return false;
+        LOG_WARN("sx1262: %s — retrying every %u s", error.c_str(), retry_interval_ms_ / 1000);
+        error.clear();
     }
 
-    healthy_ = true;
-    LOG_INFO("sx1262: %s", describe().c_str());
+    // One timer covers both halves of the job: while the radio is up it checks
+    // that the chip is still there, and while it is down it tries to bring it
+    // back. The daemon keeps running either way.
+    if (retry_interval_ms_ > 0)
+        supervise_timer_ = loop.add_repeating(retry_interval_ms_, [this] { supervise(); });
+
     return true;
+}
+
+void Sx1262::supervise() {
+    if (healthy_) {
+        // Don't poke the chip mid-transmission; the next tick will do it.
+        if (tx_busy_ || chip_responding()) return;
+        go_down("radio stopped answering — was the LoRa power rail turned off?");
+        return;
+    }
+
+    std::string error;
+    if (!bring_up(error)) {
+        LOG_DEBUG("sx1262: still down: %s", error.c_str());
+        return;
+    }
+    LOG_INFO("sx1262: radio back up — %s", describe().c_str());
+}
+
+void Sx1262::go_down(const char* why) {
+    if (retry_interval_ms_ > 0) {
+        LOG_WARN("sx1262: %s — retrying every %u s", why, retry_interval_ms_ / 1000);
+    } else {
+        LOG_ERROR("sx1262: %s", why);
+    }
+    healthy_ = false;
+
+    // Release whatever was waiting on a transmission that will now never
+    // complete, or the dispatcher would sit on a busy radio forever.
+    if (tx_busy_) {
+        tx_busy_ = false;
+        if (loop_) loop_->cancel_timer(tx_timeout_);
+        deliver_tx_done(0);
+    }
 }
 
 bool Sx1262::configure(std::string& error) {
@@ -474,6 +540,9 @@ bool Sx1262::send(ByteView data) {
 
 void Sx1262::on_irq() {
     if (irq_line_->drain_events() < 0) return;
+    // An unpowered module can leave DIO1 floating and chattering; there is
+    // nothing to read from it until the chip is back.
+    if (!healthy_) return;
 
     uint8_t status[2] = {0, 0};
     if (!cmd_read(kCmdGetIrqStatus, status)) {
@@ -553,15 +622,23 @@ void Sx1262::handle_rx_done() {
 }
 
 void Sx1262::fail(const char* what) {
-    LOG_ERROR("sx1262: SPI failure while %s — radio marked unhealthy", what);
-    healthy_ = false;
+    LOG_ERROR("sx1262: SPI failure while %s", what);
+    go_down("radio marked down after an SPI failure");
 }
 
 void Sx1262::shutdown() {
-    if (loop_ && irq_line_) loop_->remove_fd(irq_watch_);
+    if (loop_) {
+        if (irq_line_) loop_->remove_fd(irq_watch_);
+        if (supervise_timer_) loop_->cancel_timer(supervise_timer_);
+        if (tx_busy_) loop_->cancel_timer(tx_timeout_);
+    }
+    supervise_timer_ = 0;
+    tx_busy_ = false;
+
     if (healthy_) {
         cmd(kCmdSetStandby, Bytes {kStandbyRc});
-        // Leave the chip asleep so it does not draw current after we exit.
+        // Leave the chip asleep so it does not draw current after we exit. The
+        // power rail itself is somebody else's to switch.
         cmd(kCmdSetSleep, Bytes {0x00});
     }
     healthy_ = false;
@@ -572,18 +649,17 @@ void Sx1262::shutdown() {
     nss_line_.reset();
     rxen_line_.reset();
     txen_line_.reset();
-    // Cut the LoRa rail last.
-    if (power_line_) power_line_->set(false);
-    power_line_.reset();
 
     chip_.close();
     spi_.close();
 }
 
 std::string Sx1262::describe() const {
-    return vformat("SX1262 on %s (%.3f MHz, SF%u, BW %.1f kHz, CR 4/%u, %d dBm)",
-                   pins_.spidev.c_str(), params_.freq_mhz, params_.sf, params_.bw_khz,
-                   params_.cr, params_.tx_power_dbm);
+    std::string s = vformat("SX1262 on %s (%.3f MHz, SF%u, BW %.1f kHz, CR 4/%u, %d dBm)",
+                            pins_.spidev.c_str(), params_.freq_mhz, params_.sf, params_.bw_khz,
+                            params_.cr, params_.tx_power_dbm);
+    if (!healthy_) s += " — not responding";
+    return s;
 }
 
 }  // namespace umc::radio

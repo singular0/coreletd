@@ -11,8 +11,13 @@ namespace umc::radio {
 
 // SX1262 driver over spidev + libgpiod, sized for the uConsole AIO v2 wiring:
 // SPI1/CE0, DIO1 on GPIO26, BUSY on GPIO24, RESET on GPIO25, DIO2 driving the
-// RF switch and DIO3 powering the TCXO. GPIO16 gates power to the LoRa section
-// and must be driven high before the chip will answer.
+// RF switch and DIO3 powering the TCXO.
+//
+// The LoRa power rail is not ours to switch: whatever manages the board's
+// subsystems owns it, and the chip can appear and disappear underneath us at
+// any moment. An absent chip is therefore not a startup error — the driver
+// keeps checking, brings the radio up whenever it answers, and drops back to
+// checking if it stops answering.
 class Sx1262 : public Radio {
 public:
     struct Pins {
@@ -24,16 +29,19 @@ public:
         int nss = -1;  // -1 when the SPI controller drives chip select
         int rxen = -1;
         int txen = -1;
-        int power_enable = 16;
         uint32_t spi_speed_hz = 2000000;
     };
 
-    Sx1262(RadioParams params, Pins pins);
+    // `retry_interval_ms` is both how long to wait before trying an unresponsive
+    // chip again and how often a running radio is checked for one. 0 disables
+    // both: begin() then fails outright if the chip does not answer.
+    Sx1262(RadioParams params, Pins pins, uint32_t retry_interval_ms);
     ~Sx1262() override;
 
     bool begin(EventLoop& loop, std::string& error) override;
     void shutdown() override;
     bool send(ByteView data) override;
+    bool ready() const override { return healthy_; }
     bool tx_busy() const override { return tx_busy_; }
     const RadioParams& params() const override { return params_; }
     std::string describe() const override;
@@ -48,8 +56,16 @@ private:
     bool write_buffer(uint8_t offset, ByteView data);
     bool read_buffer(uint8_t offset, ByteSpan out);
 
-    // --- configuration ---
+    // --- bring-up and supervision ---
     bool reset_chip(std::string& error);
+    // Reads the part number back over SPI. False means nothing is answering,
+    // which on this board almost always means the LoRa rail is off.
+    bool chip_responding();
+    bool bring_up(std::string& error);
+    void supervise();
+    void go_down(const char* why);
+
+    // --- configuration ---
     bool configure(std::string& error);
     bool set_modulation();
     bool set_packet_params(uint8_t payload_len);
@@ -63,6 +79,7 @@ private:
 
     RadioParams params_;
     Pins pins_;
+    uint32_t retry_interval_ms_;
 
     SpiDev spi_;
     GpioChip chip_;
@@ -72,11 +89,11 @@ private:
     std::unique_ptr<GpioLine> nss_line_;
     std::unique_ptr<GpioLine> rxen_line_;
     std::unique_ptr<GpioLine> txen_line_;
-    std::unique_ptr<GpioLine> power_line_;
 
     EventLoop* loop_ = nullptr;
     EventLoop::WatchId irq_watch_ = 0;
     EventLoop::TimerId tx_timeout_ = 0;
+    EventLoop::TimerId supervise_timer_ = 0;
 
     bool tx_busy_ = false;
     uint32_t tx_started_ms_ = 0;

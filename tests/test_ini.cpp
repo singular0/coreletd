@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <fstream>
 
+#include "daemon/config.h"
 #include "tests/test_util.h"
 #include "util/ini.h"
 
@@ -129,6 +130,34 @@ static void test_unread_keys_are_tracked() {
     std::remove(path.c_str());
 }
 
+static void test_retry_interval() {
+    // Absent: the radio is retried every 10 s by default.
+    std::string path = write_temp("lora_freq = 869.618\n");
+    Config def;
+    std::string error;
+    CHECK(def.load(path, error));
+    CHECK_EQ(def.spi.retry_interval_s, uint32_t {10});
+
+    path = write_temp("lora_freq = 869.618\nlora_retry_interval = 45\n");
+    Config cfg;
+    CHECK(cfg.load(path, error));
+    CHECK_EQ(cfg.spi.retry_interval_s, uint32_t {45});
+
+    // 0 is meaningful: it turns retrying off entirely.
+    path = write_temp("lora_freq = 869.618\nlora_retry_interval = 0\n");
+    Config off;
+    CHECK(off.load(path, error));
+    CHECK_EQ(off.spi.retry_interval_s, uint32_t {0});
+
+    path = write_temp("lora_freq = 869.618\nlora_retry_interval = -5\n");
+    Config bad;
+    std::string bad_error;
+    CHECK(!bad.load(path, bad_error));
+    CHECK(!bad_error.empty());
+
+    std::remove(path.c_str());
+}
+
 int main() {
     test_basic_parsing();
     test_quotes_and_inline_comments();
@@ -137,5 +166,6 @@ int main() {
     test_malformed_reports_error();
     test_bad_values_are_reported();
     test_unread_keys_are_tracked();
+    test_retry_interval();
     return finish("ini");
 }

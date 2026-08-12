@@ -51,10 +51,16 @@ and
 .BR lora_cr .
 The installed configuration file documents every option.
 .PP
-The AIO v2 gates power to each subsystem behind a GPIO;
-.B lora_power_enable_pin
-(16) must be driven high or the SX1262 is unpowered and every SPI read returns
-zeroes. The daemon does this at startup.
+The AIO v2 gates power to each subsystem behind a GPIO. GPIO16 must be driven
+high or the SX1262 is unpowered and every SPI read returns zeroes. The daemon
+does not switch that rail: turn it on with whatever manages the board's power.
+.PP
+A radio that does not answer is therefore not a startup failure. The daemon
+starts without one, retries every
+.B lora_retry_interval
+seconds (10 by default, 0 to disable), and picks the radio up as soon as it
+appears. The same check notices a rail switched off while running: transmits
+are held and the radio is brought back when power returns.
 .SH FILES
 .TP
 .I /etc/umeshcore/umeshcored.ini

@@ -21,9 +21,11 @@ std::optional<Bytes> FrameReader::next() {
             buf_.erase(buf_.begin(), buf_.begin() + start);
         }
 
-        if (buf_.size() < 3) return std::nullopt;  // need marker + length
+        Reader r(buf_);
+        r.skip(1);  // start marker, matched above
+        uint16_t len = r.u16();
+        if (!r.ok()) return std::nullopt;  // need marker + length
 
-        uint16_t len = rd_u16(buf_, 1);
         if (len > kMaxFrameSize) {
             // Length is nonsense; drop the marker and resynchronise rather than
             // stalling forever waiting for bytes that will never come.
@@ -32,9 +34,10 @@ std::optional<Bytes> FrameReader::next() {
             continue;
         }
 
-        if (buf_.size() < 3u + len) return std::nullopt;  // frame still arriving
+        ByteView body = r.take(len);
+        if (!r.ok()) return std::nullopt;  // frame still arriving
 
-        Bytes frame(buf_.begin() + 3, buf_.begin() + 3 + len);
+        Bytes frame(body.begin(), body.end());
         buf_.erase(buf_.begin(), buf_.begin() + 3 + len);
         return frame;
     }

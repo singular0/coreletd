@@ -88,11 +88,12 @@ void Session::handle_frame(ByteView frame) {
             break;
         }
         case kCmdSetDeviceTime: {
-            if (args.size() < 4) {
+            Reader r(args);
+            uint32_t app_time = r.u32();
+            if (!r.ok()) {
                 out = resp_err(kErrIllegalArg);
                 break;
             }
-            uint32_t app_time = rd_u32(args, 0);
             // We do not have permission to step the system clock, so track the
             // difference instead. Adverts need a sane wall clock to be accepted.
             int64_t now = static_cast<int64_t>(unix_now()) - clock_offset();
@@ -211,7 +212,8 @@ Bytes Session::contact_frame(uint8_t code, const mesh::Contact& c) const {
 
 Bytes Session::cmd_get_contacts(ByteView args) {
     // Optional 4-byte "since" filter lets the app sync incrementally.
-    uint32_t since = args.size() >= 4 ? rd_u32(args, 0) : 0;
+    Reader r(args);
+    uint32_t since = r.has(4) ? r.u32() : 0;
 
     std::vector<const mesh::Contact*> matching;
     uint32_t most_recent = 0;
@@ -236,8 +238,11 @@ Bytes Session::cmd_get_contacts(ByteView args) {
 }
 
 Bytes Session::cmd_get_contact_by_key(ByteView args) {
-    if (args.size() < crypto::kPubKeySize) return resp_err(kErrIllegalArg);
-    const mesh::Contact* c = contacts_.find(subview(args, 0, crypto::kPubKeySize));
+    Reader r(args);
+    ByteView pubkey = r.take(crypto::kPubKeySize);
+    if (!r.ok()) return resp_err(kErrIllegalArg);
+
+    const mesh::Contact* c = contacts_.find(pubkey);
     if (!c) return resp_err(kErrNotFound);
     return contact_frame(kRespContact, *c);
 }
@@ -245,39 +250,31 @@ Bytes Session::cmd_get_contact_by_key(ByteView args) {
 Bytes Session::cmd_add_update_contact(ByteView args) {
     // pubkey(32) type(1) flags(1) path_len(1) path(path_len) name(32)
     // last_advert(4) [lat(4) lon(4)]
-    if (args.size() < 35) return resp_err(kErrIllegalArg);
-
-    ByteView pubkey = subview(args, 0, crypto::kPubKeySize);
-    uint8_t type = args[32];
-    uint8_t flags = args[33];
-    uint8_t path_len = args[34];
-
-    if (path_len != kNoPath && args.size() < 35u + path_len) return resp_err(kErrIllegalArg);
+    Reader r(args);
+    ByteView pubkey = r.take(crypto::kPubKeySize);
+    uint8_t type = r.u8();
+    uint8_t flags = r.u8();
+    uint8_t path_len = r.u8();
+    ByteView path = path_len == kNoPath ? ByteView {} : r.take(path_len);
+    if (!r.ok()) return resp_err(kErrIllegalArg);
 
     mesh::Contact* c = contacts_.upsert(pubkey);
     if (!c) return resp_err(kErrTableFull);
     c->type = type;
     c->flags = flags;
 
-    size_t off = 35;
-    if (path_len == kNoPath) {
+    if (path_len == kNoPath)
         contacts_.clear_path(*c);
-    } else {
-        contacts_.set_path(*c, subview(args, off, path_len));
-        off += path_len;
-    }
+    else
+        contacts_.set_path(*c, path);
 
-    if (args.size() >= off + kContactNameField) {
-        c->name = rd_fixed_str(args, off, kContactNameField);
-        off += kContactNameField;
-    }
-    if (args.size() >= off + 4) {
-        c->adv_timestamp = rd_u32(args, off);
-        off += 4;
-    }
-    if (args.size() >= off + 8) {
-        c->lat_e6 = rd_i32(args, off);
-        c->lon_e6 = rd_i32(args, off + 4);
+    // The tail is optional, one field at a time: an app may stop after the
+    // path, after the name, or after the timestamp.
+    if (r.has(kContactNameField)) c->name = r.fixed_str(kContactNameField);
+    if (r.has(4)) c->adv_timestamp = r.u32();
+    if (r.has(8)) {
+        c->lat_e6 = r.i32();
+        c->lon_e6 = r.i32();
     }
 
     contacts_.mark_dirty();
@@ -287,14 +284,20 @@ Bytes Session::cmd_add_update_contact(ByteView args) {
 }
 
 Bytes Session::cmd_remove_contact(ByteView args) {
-    if (args.size() < crypto::kPubKeySize) return resp_err(kErrIllegalArg);
-    if (!contacts_.remove(subview(args, 0, crypto::kPubKeySize))) return resp_err(kErrNotFound);
+    Reader r(args);
+    ByteView pubkey = r.take(crypto::kPubKeySize);
+    if (!r.ok()) return resp_err(kErrIllegalArg);
+
+    if (!contacts_.remove(pubkey)) return resp_err(kErrNotFound);
     return saved_reply();
 }
 
 Bytes Session::cmd_reset_path(ByteView args) {
-    if (args.size() < crypto::kPubKeySize) return resp_err(kErrIllegalArg);
-    mesh::Contact* c = contacts_.find(subview(args, 0, crypto::kPubKeySize));
+    Reader r(args);
+    ByteView pubkey = r.take(crypto::kPubKeySize);
+    if (!r.ok()) return resp_err(kErrIllegalArg);
+
+    mesh::Contact* c = contacts_.find(pubkey);
     if (!c) return resp_err(kErrNotFound);
 
     // Forget the route so the next message floods and rediscovers it.
@@ -307,10 +310,11 @@ Bytes Session::cmd_export_contact(ByteView args) {
     // The payload is a complete signed advert packet, which is what the app
     // encodes into a meshcore:// URI. A bare public key is not importable:
     // the receiving node verifies the signature before trusting the name.
-    if (args.size() >= crypto::kPubKeySize) {
+    Reader r(args);
+    if (r.has(crypto::kPubKeySize)) {
         // Re-exporting someone else's card needs their original signed advert,
         // which we cannot forge and do not retain.
-        const mesh::Contact* c = contacts_.find(subview(args, 0, crypto::kPubKeySize));
+        const mesh::Contact* c = contacts_.find(r.take(crypto::kPubKeySize));
         if (!c) return resp_err(kErrNotFound);
         LOG_INFO("companion: cannot export %s — peer adverts are not retained",
                  hex_prefix(c->pubkey).c_str());
@@ -327,12 +331,14 @@ Bytes Session::cmd_export_contact(ByteView args) {
 
 Bytes Session::cmd_send_txt_msg(ByteView args) {
     // txt_type(1) attempt(1) timestamp(4) pubkey_prefix(6) message
-    if (args.size() < 12) return resp_err(kErrIllegalArg);
+    Reader r(args);
+    uint8_t txt_type = r.u8();
+    r.skip(1);  // attempt: the node runs its own retry ladder
+    uint32_t timestamp = r.u32();
+    ByteView prefix = r.take(6);
+    if (!r.ok()) return resp_err(kErrIllegalArg);
 
-    uint8_t txt_type = args[0];
-    uint32_t timestamp = rd_u32(args, 2);
-    ByteView prefix = subview(args, 6, 6);
-    std::string text = to_string(subview(args, 12));
+    std::string text = to_string(r.rest());
 
     // The app addresses contacts by a 6-byte key prefix, not the full key.
     mesh::Contact* target = nullptr;
@@ -363,11 +369,13 @@ Bytes Session::cmd_send_txt_msg(ByteView args) {
 
 Bytes Session::cmd_send_channel_txt_msg(ByteView args) {
     // txt_type(1) channel_index(1) timestamp(4) message
-    if (args.size() < 6) return resp_err(kErrIllegalArg);
+    Reader r(args);
+    r.skip(1);  // txt_type: channel messages are always plain
+    uint8_t channel_index = r.u8();
+    uint32_t timestamp = r.u32();
+    if (!r.ok()) return resp_err(kErrIllegalArg);
 
-    uint8_t channel_index = args[1];
-    uint32_t timestamp = rd_u32(args, 2);
-    std::string text = to_string(subview(args, 6));
+    std::string text = to_string(r.rest());
 
     if (!node_.send_channel_text(channel_index, text, timestamp)) return resp_err(kErrNotFound);
 
@@ -407,8 +415,10 @@ Bytes Session::cmd_sync_next_message(ByteView args) {
 }
 
 Bytes Session::cmd_get_channel(ByteView args) {
-    if (args.empty()) return resp_err(kErrIllegalArg);
-    uint8_t index = args[0];
+    Reader r(args);
+    uint8_t index = r.u8();
+    if (!r.ok()) return resp_err(kErrIllegalArg);
+
     const mesh::Channel* ch = channels_.at(index);
     if (!ch) return resp_err(kErrNotFound);
 
@@ -421,14 +431,15 @@ Bytes Session::cmd_get_channel(ByteView args) {
 
 Bytes Session::cmd_set_channel(ByteView args) {
     // index(1) name(32) secret(16)
-    if (args.size() < 1 + kChannelNameField + kChannelSecretSize) return resp_err(kErrIllegalArg);
-
-    uint8_t index = args[0];
+    Reader r(args);
+    uint8_t index = r.u8();
+    std::string name = r.fixed_str(kChannelNameField);
+    ByteView secret = r.take(kChannelSecretSize);
+    if (!r.ok()) return resp_err(kErrIllegalArg);
     if (index >= mesh::ChannelStore::kMaxChannels) return resp_err(kErrIllegalArg);
 
     mesh::Channel ch;
-    ch.name = rd_fixed_str(args, 1, kChannelNameField);
-    ByteView secret = subview(args, 1 + kChannelNameField, kChannelSecretSize);
+    ch.name = std::move(name);
     ch.secret.assign(secret.begin(), secret.end());
 
     // An all-zero secret is how the app clears a slot.
@@ -448,10 +459,14 @@ Bytes Session::cmd_set_advert_name(ByteView args) {
 }
 
 Bytes Session::cmd_set_advert_latlon(ByteView args) {
-    if (args.size() < 8) return resp_err(kErrIllegalArg);
+    Reader r(args);
+    int32_t lat_e6 = r.i32();
+    int32_t lon_e6 = r.i32();
+    if (!r.ok()) return resp_err(kErrIllegalArg);
+
     auto& cfg = node_.config();
-    cfg.lat_e6 = rd_i32(args, 0);
-    cfg.lon_e6 = rd_i32(args, 4);
+    cfg.lat_e6 = lat_e6;
+    cfg.lon_e6 = lon_e6;
     cfg.has_location = cfg.lat_e6 != 0 || cfg.lon_e6 != 0;
     LOG_INFO("companion: advert location set to %.6f, %.6f", cfg.lat_e6 / 1e6, cfg.lon_e6 / 1e6);
     return resp_ok();

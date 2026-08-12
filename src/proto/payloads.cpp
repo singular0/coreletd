@@ -24,47 +24,41 @@ Bytes AdvertAppData::encode() const {
 }
 
 std::optional<AdvertAppData> AdvertAppData::decode(ByteView data) {
-    if (data.empty()) return std::nullopt;
+    Reader r(data);
 
     AdvertAppData app;
-    size_t off = 0;
-    app.flags = data[off++];
-
-    auto need = [&](size_t n) { return data.size() >= off + n; };
-
+    app.flags = r.u8();
     if (app.flags & kAdvHasLocation) {
-        if (!need(8)) return std::nullopt;
-        app.lat_e6 = rd_i32(data, off);
-        app.lon_e6 = rd_i32(data, off + 4);
-        off += 8;
+        app.lat_e6 = r.i32();
+        app.lon_e6 = r.i32();
     }
-    if (app.flags & kAdvHasFeature1) {
-        if (!need(2)) return std::nullopt;
-        app.feature1 = rd_u16(data, off);
-        off += 2;
-    }
-    if (app.flags & kAdvHasFeature2) {
-        if (!need(2)) return std::nullopt;
-        app.feature2 = rd_u16(data, off);
-        off += 2;
-    }
+    if (app.flags & kAdvHasFeature1) app.feature1 = r.u16();
+    if (app.flags & kAdvHasFeature2) app.feature2 = r.u16();
+    if (!r.ok()) return std::nullopt;
+
     // The name runs to the end of the appdata and is not NUL-terminated.
-    if (app.flags & kAdvHasName) app.name = to_string(subview(data, off));
+    if (app.flags & kAdvHasName) app.name = to_string(r.rest());
     return app;
 }
 
 std::optional<Advert> Advert::decode(ByteView payload) {
     constexpr size_t kFixed = crypto::kPubKeySize + 4 + crypto::kSignatureSize;
-    if (payload.size() < kFixed) {
+
+    Reader r(payload);
+    ByteView pubkey = r.take(crypto::kPubKeySize);
+    uint32_t timestamp = r.u32();
+    ByteView signature = r.take(crypto::kSignatureSize);
+    if (!r.ok()) {
         LOG_DEBUG("advert: payload too short (%zu < %zu)", payload.size(), kFixed);
         return std::nullopt;
     }
+    ByteView appdata = r.rest();
 
     Advert a;
-    a.pubkey.assign(payload.begin(), payload.begin() + crypto::kPubKeySize);
-    a.timestamp = rd_u32(payload, crypto::kPubKeySize);
-    a.signature.assign(payload.begin() + crypto::kPubKeySize + 4, payload.begin() + kFixed);
-    a.appdata.assign(payload.begin() + kFixed, payload.end());
+    a.pubkey.assign(pubkey.begin(), pubkey.end());
+    a.timestamp = timestamp;
+    a.signature.assign(signature.begin(), signature.end());
+    a.appdata.assign(appdata.begin(), appdata.end());
     return a;
 }
 
@@ -108,14 +102,17 @@ Advert Advert::create(const crypto::LocalIdentity& self, uint32_t timestamp,
 // ---------------------------------------------------------------------------
 
 std::optional<DirectEnvelope> DirectEnvelope::decode(ByteView payload) {
-    constexpr size_t kFixed = 1 + 1 + crypto::kCipherMacSize;
-    if (payload.size() <= kFixed) return std::nullopt;
-
+    Reader r(payload);
     DirectEnvelope e;
-    e.dest_hash = payload[0];
-    e.src_hash = payload[1];
-    e.mac.assign(payload.begin() + 2, payload.begin() + kFixed);
-    e.ciphertext.assign(payload.begin() + kFixed, payload.end());
+    e.dest_hash = r.u8();
+    e.src_hash = r.u8();
+    ByteView mac = r.take(crypto::kCipherMacSize);
+    ByteView ciphertext = r.rest();
+    // An envelope with no ciphertext carries nothing to open.
+    if (!r.ok() || ciphertext.empty()) return std::nullopt;
+
+    e.mac.assign(mac.begin(), mac.end());
+    e.ciphertext.assign(ciphertext.begin(), ciphertext.end());
     return e;
 }
 
@@ -143,14 +140,17 @@ DirectEnvelope DirectEnvelope::seal(uint8_t dest_hash, uint8_t src_hash, ByteVie
 }
 
 std::optional<AnonReqEnvelope> AnonReqEnvelope::decode(ByteView payload) {
-    constexpr size_t kFixed = 1 + crypto::kPubKeySize + crypto::kCipherMacSize;
-    if (payload.size() <= kFixed) return std::nullopt;
-
+    Reader r(payload);
     AnonReqEnvelope e;
-    e.dest_hash = payload[0];
-    e.pubkey.assign(payload.begin() + 1, payload.begin() + 1 + crypto::kPubKeySize);
-    e.mac.assign(payload.begin() + 1 + crypto::kPubKeySize, payload.begin() + kFixed);
-    e.ciphertext.assign(payload.begin() + kFixed, payload.end());
+    e.dest_hash = r.u8();
+    ByteView pubkey = r.take(crypto::kPubKeySize);
+    ByteView mac = r.take(crypto::kCipherMacSize);
+    ByteView ciphertext = r.rest();
+    if (!r.ok() || ciphertext.empty()) return std::nullopt;
+
+    e.pubkey.assign(pubkey.begin(), pubkey.end());
+    e.mac.assign(mac.begin(), mac.end());
+    e.ciphertext.assign(ciphertext.begin(), ciphertext.end());
     return e;
 }
 
@@ -178,13 +178,15 @@ AnonReqEnvelope AnonReqEnvelope::seal(uint8_t dest_hash, ByteView sender_pub, By
 }
 
 std::optional<GroupEnvelope> GroupEnvelope::decode(ByteView payload) {
-    constexpr size_t kFixed = 1 + crypto::kCipherMacSize;
-    if (payload.size() <= kFixed) return std::nullopt;
-
+    Reader r(payload);
     GroupEnvelope e;
-    e.channel_hash = payload[0];
-    e.mac.assign(payload.begin() + 1, payload.begin() + kFixed);
-    e.ciphertext.assign(payload.begin() + kFixed, payload.end());
+    e.channel_hash = r.u8();
+    ByteView mac = r.take(crypto::kCipherMacSize);
+    ByteView ciphertext = r.rest();
+    if (!r.ok() || ciphertext.empty()) return std::nullopt;
+
+    e.mac.assign(mac.begin(), mac.end());
+    e.ciphertext.assign(ciphertext.begin(), ciphertext.end());
     return e;
 }
 
@@ -213,15 +215,18 @@ GroupEnvelope GroupEnvelope::seal(uint8_t channel_hash, ByteView key, ByteView p
 // ---------------------------------------------------------------------------
 
 std::optional<TextMessage> TextMessage::decode(ByteView plaintext) {
-    if (plaintext.size() < 5) return std::nullopt;
+    Reader r(plaintext);
+    uint32_t timestamp = r.u32();
+    uint8_t type_and_attempt = r.u8();
+    if (!r.ok()) return std::nullopt;
 
     TextMessage m;
-    m.timestamp = rd_u32(plaintext, 0);
+    m.timestamp = timestamp;
     // Upper six bits are the type, lower two the retry attempt.
-    m.txt_type = static_cast<uint8_t>(plaintext[4] >> 2);
-    m.attempt = static_cast<uint8_t>(plaintext[4] & 0x03);
+    m.txt_type = static_cast<uint8_t>(type_and_attempt >> 2);
+    m.attempt = static_cast<uint8_t>(type_and_attempt & 0x03);
 
-    ByteView body = strip_zero_padding(subview(plaintext, 5));
+    ByteView body = strip_zero_padding(r.rest());
     m.text.assign(body.begin(), body.end());
     return m;
 }
@@ -260,20 +265,21 @@ Bytes message_ack_hash(ByteView plaintext, ByteView pubkey) {
 }
 
 std::optional<PathReturn> PathReturn::decode(ByteView plaintext) {
-    if (plaintext.empty()) return std::nullopt;
+    Reader r(plaintext);
+    const uint8_t path_len = r.u8();
+    ByteView path = r.take(path_len);
+    if (!r.ok()) return std::nullopt;
 
     PathReturn p;
-    const size_t path_len = plaintext[0];
-    if (plaintext.size() < 1 + path_len) return std::nullopt;
-    p.path.assign(plaintext.begin() + 1, plaintext.begin() + 1 + path_len);
+    p.path.assign(path.begin(), path.end());
 
-    size_t off = 1 + path_len;
-    if (off < plaintext.size()) {
+    if (r.has(1)) {
         p.has_extra = true;
-        p.extra_type = plaintext[off++];
+        p.extra_type = r.u8();
         // Whatever follows is the bundled payload; padding is the caller's
         // problem since only it knows the extra type's length.
-        p.extra.assign(plaintext.begin() + off, plaintext.end());
+        ByteView extra = r.rest();
+        p.extra.assign(extra.begin(), extra.end());
     }
     return p;
 }

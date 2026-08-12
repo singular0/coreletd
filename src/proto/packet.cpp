@@ -58,31 +58,29 @@ void Packet::pop_hop() {
 }
 
 std::optional<Packet> Packet::decode(ByteView raw) {
-    if (raw.empty()) return std::nullopt;
+    Reader r(raw);
 
     Packet p;
-    size_t off = 0;
-
-    const uint8_t header = raw[off++];
+    const uint8_t header = r.u8();
+    if (!r.ok()) return std::nullopt;
     p.route = static_cast<RouteType>(header & kRouteMask);
     p.type = static_cast<PayloadType>((header & kPayloadTypeMask) >> 2);
     p.payload_version = static_cast<uint8_t>((header & kPayloadVerMask) >> 6);
 
     if (p.has_transport_codes()) {
-        if (raw.size() < off + 4) {
+        p.transport_code1 = r.u16();
+        p.transport_code2 = r.u16();
+        if (!r.ok()) {
             LOG_DEBUG("packet: truncated transport codes");
             return std::nullopt;
         }
-        p.transport_code1 = rd_u16(raw, off);
-        p.transport_code2 = rd_u16(raw, off + 2);
-        off += 4;
     }
 
-    if (raw.size() < off + 1) {
+    const uint8_t path_len = r.u8();
+    if (!r.ok()) {
         LOG_DEBUG("packet: missing path length");
         return std::nullopt;
     }
-    const uint8_t path_len = raw[off++];
 
     // path_length is not a byte count: bits 0-5 are the hop count and bits 6-7
     // carry (hash size - 1). The byte length is the product of the two.
@@ -98,19 +96,19 @@ std::optional<Packet> Packet::decode(ByteView raw) {
         LOG_DEBUG("packet: path of %zu bytes exceeds max %zu", path_bytes, kMaxPathSize);
         return std::nullopt;
     }
-    if (raw.size() < off + path_bytes) {
-        LOG_DEBUG("packet: truncated path (want %zu, have %zu)", path_bytes, raw.size() - off);
+    ByteView path = r.take(path_bytes);
+    if (!r.ok()) {
+        LOG_DEBUG("packet: truncated path (want %zu, have %zu)", path_bytes, r.remaining());
         return std::nullopt;
     }
-    p.path.assign(raw.begin() + off, raw.begin() + off + path_bytes);
-    off += path_bytes;
+    p.path.assign(path.begin(), path.end());
 
-    const size_t payload_bytes = raw.size() - off;
-    if (payload_bytes > kMaxPayloadSize) {
-        LOG_DEBUG("packet: payload of %zu bytes exceeds max %zu", payload_bytes, kMaxPayloadSize);
+    ByteView payload = r.rest();
+    if (payload.size() > kMaxPayloadSize) {
+        LOG_DEBUG("packet: payload of %zu bytes exceeds max %zu", payload.size(), kMaxPayloadSize);
         return std::nullopt;
     }
-    p.payload.assign(raw.begin() + off, raw.end());
+    p.payload.assign(payload.begin(), payload.end());
     return p;
 }
 

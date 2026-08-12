@@ -102,9 +102,10 @@ static void test_response_framing() {
     Bytes payload = {kRespOk, 1, 2, 3};
     Bytes framed = frame_response(payload);
 
-    CHECK_EQ(framed[0], uint8_t {kFrameToApp});
-    CHECK_EQ(rd_u16(framed, 1), uint16_t {4});
-    CHECK_BYTES(subview(framed, 3), payload);
+    Reader hdr(framed);
+    CHECK_EQ(hdr.u8(), uint8_t {kFrameToApp});
+    CHECK_EQ(hdr.u16(), uint16_t {4});
+    CHECK_BYTES(hdr.rest(), payload);
 
     // A framed response must be readable by the same de-framer.
     FrameReader r;
@@ -120,7 +121,9 @@ static void test_response_helpers() {
 
     Bytes ok_val = resp_ok(0x12345678);
     CHECK_EQ(ok_val.size(), size_t {5});
-    CHECK_EQ(rd_u32(ok_val, 1), uint32_t {0x12345678});
+    Reader r(ok_val);
+    CHECK_EQ(r.u8(), uint8_t {kRespOk});
+    CHECK_EQ(r.u32(), uint32_t {0x12345678});
 }
 
 static void test_outbound_buffer_limit_is_overflow_safe() {

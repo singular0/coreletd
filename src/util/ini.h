@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -23,6 +24,7 @@ public:
     // Parse failures are reported through `ok` rather than silently defaulting,
     // so a typo'd pin number is a startup error instead of a dead radio.
     long get_int(std::string_view key, long def, bool& ok) const;
+    int64_t get_int64(std::string_view key, int64_t def, bool& ok) const;
     double get_double(std::string_view key, double def, bool& ok) const;
     bool get_bool(std::string_view key, bool def, bool& ok) const;
 

@@ -109,6 +109,20 @@ long Ini::get_int(std::string_view key, long def, bool& ok) const {
     return out;
 }
 
+int64_t Ini::get_int64(std::string_view key, int64_t def, bool& ok) const {
+    ok = true;
+    const std::string* v = find(key);
+    if (!v || v->empty()) return def;
+    errno = 0;
+    char* end = nullptr;
+    long long out = std::strtoll(v->c_str(), &end, 0);
+    if (errno != 0 || end == v->c_str() || *end != '\0') {
+        ok = false;
+        return def;
+    }
+    return static_cast<int64_t>(out);
+}
+
 double Ini::get_double(std::string_view key, double def, bool& ok) const {
     ok = true;
     const std::string* v = find(key);

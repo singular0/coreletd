@@ -158,6 +158,82 @@ static void test_retry_interval() {
     std::remove(path.c_str());
 }
 
+static void check_config_rejected(const std::string& setting) {
+    std::string path = write_temp("lora_freq = 869.618\n" + setting + "\n");
+    Config cfg;
+    std::string error;
+    CHECK(!cfg.load(path, error));
+    CHECK(!error.empty());
+}
+
+static void test_config_rejects_malformed_and_unsafe_values() {
+    // Malformed values must fail startup instead of silently selecting the
+    // defaults. Cover each parser kind used by Config.
+    check_config_rejected("lora_sf = eight");
+    check_config_rejected("duty_cycle = often");
+    check_config_rejected("repeat = perhaps");
+
+    // Narrow integer fields and timer multiplication cannot wrap.
+    check_config_rejected("lora_preamble = 65536");
+    check_config_rejected("lora_sync_word = 256");
+    check_config_rejected("advert_interval = -1");
+    check_config_rejected("advert_interval = 4294968");
+    check_config_rejected("max_hops = -1");
+    check_config_rejected("max_hops = 65");
+    check_config_rejected("companion_port = 0");
+    check_config_rejected("companion_port = 65536");
+
+    // Values sent to the radio must remain within SX1262 limits.
+    check_config_rejected("lora_freq = 149.9");
+    check_config_rejected("lora_freq = 960.1");
+    check_config_rejected("lora_bw = 100");
+    check_config_rejected("lora_tcxo = 1.5");
+    check_config_rejected("lora_tcxo = 3.4");
+    check_config_rejected("current_limit = 0");
+    check_config_rejected("current_limit = 158");
+    check_config_rejected("spi_speed = 0");
+    check_config_rejected("spi_speed = 16000001");
+
+    // Duty-cycle enforcement must never be disabled by an invalid percentage.
+    check_config_rejected("duty_cycle = 0");
+    check_config_rejected("duty_cycle = 100");
+    check_config_rejected("duty_cycle = nan");
+
+    check_config_rejected("lat = -90.1");
+    check_config_rejected("lat = nan");
+    check_config_rejected("lon = 180.1");
+}
+
+static void test_config_accepts_valid_boundaries() {
+    std::string path = write_temp(
+        "lora_freq = 150\n"
+        "lora_bw = 7.81\n"
+        "lora_sf = 5\n"
+        "lora_cr = 5\n"
+        "lora_tx_power = -9\n"
+        "lora_preamble = 1\n"
+        "lora_sync_word = 255\n"
+        "lora_tcxo = 0\n"
+        "current_limit = 157\n"
+        "duty_cycle = 0.01\n"
+        "spi_speed = 16000000\n"
+        "lora_retry_interval = 0\n"
+        "advert_interval = 4294967\n"
+        "max_hops = 64\n"
+        "lat = -90\n"
+        "lon = 180\n"
+        "companion_port = 65535\n");
+    Config cfg;
+    std::string error;
+    CHECK(cfg.load(path, error));
+    CHECK_EQ(cfg.radio.preamble, uint16_t {1});
+    CHECK_EQ(cfg.node.advert_interval_s, uint32_t {4294967});
+    CHECK_EQ(cfg.node.max_hops, uint8_t {64});
+    CHECK_EQ(cfg.companion.port, uint16_t {65535});
+    CHECK_EQ(cfg.node.lat_e6, int32_t {-90000000});
+    CHECK_EQ(cfg.node.lon_e6, int32_t {180000000});
+}
+
 int main() {
     test_basic_parsing();
     test_quotes_and_inline_comments();
@@ -167,5 +243,7 @@ int main() {
     test_bad_values_are_reported();
     test_unread_keys_are_tracked();
     test_retry_interval();
+    test_config_rejects_malformed_and_unsafe_values();
+    test_config_accepts_valid_boundaries();
     return finish("ini");
 }

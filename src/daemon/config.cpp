@@ -3,7 +3,11 @@
 #include <pwd.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <filesystem>
+#include <limits>
 
 #include "util/ini.h"
 
@@ -23,6 +27,52 @@ std::string default_state_dir() {
     return "./umeshcore-state";
 }
 
+bool read_int(const Ini& ini, std::string_view key, int64_t def, int64_t min, int64_t max,
+              int64_t& value, std::string& error) {
+    bool ok = true;
+    value = ini.get_int64(key, def, ok);
+    if (!ok) {
+        error = std::string(key) + ": not an integer";
+        return false;
+    }
+    if (value < min || value > max) {
+        error = std::string(key) + " must be between " + std::to_string(min) + " and " +
+                std::to_string(max);
+        return false;
+    }
+    return true;
+}
+
+bool read_double(const Ini& ini, std::string_view key, double def, double& value,
+                 std::string& error) {
+    bool ok = true;
+    value = ini.get_double(key, def, ok);
+    if (!ok || !std::isfinite(value)) {
+        error = std::string(key) + ": not a finite number";
+        return false;
+    }
+    return true;
+}
+
+bool read_bool(const Ini& ini, std::string_view key, bool def, bool& value,
+               std::string& error) {
+    bool ok = true;
+    value = ini.get_bool(key, def, ok);
+    if (!ok) {
+        error = std::string(key) + ": not a boolean";
+        return false;
+    }
+    return true;
+}
+
+bool supported_bandwidth(double khz) {
+    static constexpr std::array<double, 10> kBandwidths = {
+        7.81, 10.42, 15.63, 20.83, 31.25, 41.67, 62.5, 125.0, 250.0, 500.0,
+    };
+    return std::any_of(kBandwidths.begin(), kBandwidths.end(),
+                       [khz](double supported) { return std::fabs(khz - supported) < 0.005; });
+}
+
 }  // namespace
 
 bool Config::load(const std::string& path, std::string& error) {
@@ -40,15 +90,18 @@ bool Config::load(const std::string& path, std::string& error) {
     state_dir = ini.get_str("state_dir", default_state_dir());
 
     // --- radio ---
-    bool ok = true;
-    radio.freq_mhz = ini.get_double("lora_freq", 0.0, ok);
-    if (!ok) {
-        error = "lora_freq: not a number";
-        return false;
-    }
-    use_mock_radio = ini.get_bool("mock_radio", false);
+    bool boolean = false;
+    if (!read_bool(ini, "mock_radio", use_mock_radio, boolean, error)) return false;
+    use_mock_radio = boolean;
     mock_replay_file = ini.get_str("mock_replay_file");
 
+    double real = 0.0;
+    if (!read_double(ini, "lora_freq", radio.freq_mhz, real, error)) return false;
+    if (real != 0.0 && (real < 150.0 || real > 960.0)) {
+        error = "lora_freq must be between 150 and 960 MHz";
+        return false;
+    }
+    radio.freq_mhz = real;
     if (radio.freq_mhz <= 0 && !use_mock_radio) {
         error =
             "lora_freq is required — set the frequency for your region "
@@ -56,67 +109,116 @@ bool Config::load(const std::string& path, std::string& error) {
         return false;
     }
 
-    radio.bw_khz = ini.get_double("lora_bw", radio.bw_khz);
-    radio.sf = static_cast<uint8_t>(ini.get_int("lora_sf", radio.sf));
-    radio.cr = static_cast<uint8_t>(ini.get_int("lora_cr", radio.cr));
-    radio.tx_power_dbm = static_cast<int>(ini.get_int("lora_tx_power", radio.tx_power_dbm));
-    radio.preamble = static_cast<uint16_t>(ini.get_int("lora_preamble", radio.preamble));
-    radio.sync_word = static_cast<uint8_t>(ini.get_int("lora_sync_word", radio.sync_word));
-    radio.tcxo_voltage = ini.get_double("lora_tcxo", radio.tcxo_voltage);
-    radio.dio2_as_rf_switch = ini.get_bool("dio2_as_rf_switch", radio.dio2_as_rf_switch);
-    radio.rx_boosted_gain = ini.get_bool("rx_boosted_gain", radio.rx_boosted_gain);
-    radio.current_limit_ma = static_cast<int>(ini.get_int("current_limit", radio.current_limit_ma));
-    radio.duty_cycle_pct = ini.get_double("duty_cycle", radio.duty_cycle_pct);
+    if (!read_double(ini, "lora_bw", radio.bw_khz, real, error)) return false;
+    if (!supported_bandwidth(real)) {
+        error = "lora_bw must be a bandwidth supported by SX1262 (7.81 to 500 kHz)";
+        return false;
+    }
+    radio.bw_khz = real;
 
-    if (radio.sf < 5 || radio.sf > 12) {
-        error = "lora_sf must be between 5 and 12";
+    int64_t integer = 0;
+    if (!read_int(ini, "lora_sf", radio.sf, 5, 12, integer, error)) return false;
+    radio.sf = static_cast<uint8_t>(integer);
+    if (!read_int(ini, "lora_cr", radio.cr, 5, 8, integer, error)) return false;
+    radio.cr = static_cast<uint8_t>(integer);
+    if (!read_int(ini, "lora_tx_power", radio.tx_power_dbm, -9, 22, integer, error))
+        return false;
+    radio.tx_power_dbm = static_cast<int>(integer);
+    if (!read_int(ini, "lora_preamble", radio.preamble, 1,
+                  std::numeric_limits<uint16_t>::max(), integer, error))
+        return false;
+    radio.preamble = static_cast<uint16_t>(integer);
+    if (!read_int(ini, "lora_sync_word", radio.sync_word, 0,
+                  std::numeric_limits<uint8_t>::max(), integer, error))
+        return false;
+    radio.sync_word = static_cast<uint8_t>(integer);
+
+    if (!read_double(ini, "lora_tcxo", radio.tcxo_voltage, real, error)) return false;
+    if (real != 0.0 && (real < 1.6 || real > 3.3)) {
+        error = "lora_tcxo must be 0 (disabled) or between 1.6 and 3.3 volts";
         return false;
     }
-    if (radio.cr < 5 || radio.cr > 8) {
-        error = "lora_cr must be between 5 and 8 (the 4/N denominator)";
+    radio.tcxo_voltage = real;
+    if (!read_bool(ini, "dio2_as_rf_switch", radio.dio2_as_rf_switch, boolean, error))
+        return false;
+    radio.dio2_as_rf_switch = boolean;
+    if (!read_bool(ini, "rx_boosted_gain", radio.rx_boosted_gain, boolean, error))
+        return false;
+    radio.rx_boosted_gain = boolean;
+    if (!read_int(ini, "current_limit", radio.current_limit_ma, 1, 157, integer, error))
+        return false;
+    radio.current_limit_ma = static_cast<int>(integer);
+    if (!read_double(ini, "duty_cycle", radio.duty_cycle_pct, real, error)) return false;
+    if (real <= 0.0 || real >= 100.0) {
+        error = "duty_cycle must be greater than 0 and less than 100 percent";
         return false;
     }
-    if (radio.tx_power_dbm < -9 || radio.tx_power_dbm > 22) {
-        error = "lora_tx_power must be between -9 and 22 dBm";
-        return false;
-    }
+    radio.duty_cycle_pct = real;
 
     // --- SPI / GPIO ---
     spi.spidev = ini.get_str("spidev", spi.spidev);
     spi.gpiochip = ini.get_str("lora_gpiochip", spi.gpiochip);
-    spi.irq_pin = static_cast<int>(ini.get_int("lora_irq_pin", spi.irq_pin));
-    spi.busy_pin = static_cast<int>(ini.get_int("lora_busy_pin", spi.busy_pin));
-    spi.reset_pin = static_cast<int>(ini.get_int("lora_reset_pin", spi.reset_pin));
-    spi.nss_pin = static_cast<int>(ini.get_int("lora_nss_pin", spi.nss_pin));
-    spi.rxen_pin = static_cast<int>(ini.get_int("lora_rxen_pin", spi.rxen_pin));
-    spi.txen_pin = static_cast<int>(ini.get_int("lora_txen_pin", spi.txen_pin));
-    spi.spi_speed_hz = static_cast<uint32_t>(ini.get_int("spi_speed", spi.spi_speed_hz));
-
-    long retry_s = ini.get_int("lora_retry_interval", spi.retry_interval_s);
-    if (retry_s < 0 || retry_s > 86400) {
-        error = "lora_retry_interval must be between 0 and 86400 seconds (0 disables retrying)";
+    constexpr int64_t kMaxInt = std::numeric_limits<int>::max();
+    if (!read_int(ini, "lora_irq_pin", spi.irq_pin, 0, kMaxInt, integer, error)) return false;
+    spi.irq_pin = static_cast<int>(integer);
+    if (!read_int(ini, "lora_busy_pin", spi.busy_pin, 0, kMaxInt, integer, error)) return false;
+    spi.busy_pin = static_cast<int>(integer);
+    if (!read_int(ini, "lora_reset_pin", spi.reset_pin, 0, kMaxInt, integer, error)) return false;
+    spi.reset_pin = static_cast<int>(integer);
+    if (!read_int(ini, "lora_nss_pin", spi.nss_pin, -1, kMaxInt, integer, error)) return false;
+    spi.nss_pin = static_cast<int>(integer);
+    if (!read_int(ini, "lora_rxen_pin", spi.rxen_pin, -1, kMaxInt, integer, error)) return false;
+    spi.rxen_pin = static_cast<int>(integer);
+    if (!read_int(ini, "lora_txen_pin", spi.txen_pin, -1, kMaxInt, integer, error)) return false;
+    spi.txen_pin = static_cast<int>(integer);
+    if (!read_int(ini, "spi_speed", spi.spi_speed_hz, 1, 16000000, integer, error))
         return false;
-    }
-    spi.retry_interval_s = static_cast<uint32_t>(retry_s);
+    spi.spi_speed_hz = static_cast<uint32_t>(integer);
+    if (!read_int(ini, "lora_retry_interval", spi.retry_interval_s, 0, 86400, integer,
+                  error))
+        return false;
+    spi.retry_interval_s = static_cast<uint32_t>(integer);
 
     // --- node ---
     node.name = ini.get_str("advert_name", node.name);
-    node.advert_interval_s =
-        static_cast<uint32_t>(ini.get_int("advert_interval", node.advert_interval_s));
-    node.repeat = ini.get_bool("repeat", node.repeat);
-    node.max_hops = static_cast<uint8_t>(ini.get_int("max_hops", node.max_hops));
+    constexpr int64_t kMaxTimerDelaySeconds = std::numeric_limits<uint32_t>::max() / 1000;
+    if (!read_int(ini, "advert_interval", node.advert_interval_s, 0, kMaxTimerDelaySeconds,
+                  integer, error))
+        return false;
+    node.advert_interval_s = static_cast<uint32_t>(integer);
+    if (!read_bool(ini, "repeat", node.repeat, boolean, error)) return false;
+    node.repeat = boolean;
+    if (!read_int(ini, "max_hops", node.max_hops, 0, proto::kMaxPathSize, integer, error))
+        return false;
+    node.max_hops = static_cast<uint8_t>(integer);
 
-    double lat = ini.get_double("lat", 0.0);
-    double lon = ini.get_double("lon", 0.0);
+    double lat = 0.0;
+    double lon = 0.0;
+    if (!read_double(ini, "lat", 0.0, lat, error)) return false;
+    if (!read_double(ini, "lon", 0.0, lon, error)) return false;
+    if (lat < -90.0 || lat > 90.0) {
+        error = "lat must be between -90 and 90 degrees";
+        return false;
+    }
+    if (lon < -180.0 || lon > 180.0) {
+        error = "lon must be between -180 and 180 degrees";
+        return false;
+    }
+    node.has_location = false;
+    node.lat_e6 = 0;
+    node.lon_e6 = 0;
     if (lat != 0.0 || lon != 0.0) {
         node.has_location = true;
-        node.lat_e6 = static_cast<int32_t>(lat * 1000000.0);
-        node.lon_e6 = static_cast<int32_t>(lon * 1000000.0);
+        node.lat_e6 = static_cast<int32_t>(std::llround(lat * 1000000.0));
+        node.lon_e6 = static_cast<int32_t>(std::llround(lon * 1000000.0));
     }
 
     // --- companion ---
     companion.bind_addr = ini.get_str("companion_bind", companion.bind_addr);
-    companion.port = static_cast<uint16_t>(ini.get_int("companion_port", companion.port));
+    if (!read_int(ini, "companion_port", companion.port, 1,
+                  std::numeric_limits<uint16_t>::max(), integer, error))
+        return false;
+    companion.port = static_cast<uint16_t>(integer);
 
     // Explicit path overrides.
     identity_path = ini.get_str("identity_path");

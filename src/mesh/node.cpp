@@ -413,16 +413,17 @@ void Node::handle_text(const proto::Packet& p) {
     from->last_snr = p.snr;
     if (p.is_flood()) record_return_path(*from, p);
 
-    LOG_INFO("msg from %s: %s", from->name.empty() ? hex_prefix(from->pubkey).c_str()
-                                                   : from->name.c_str(),
-             msg->body().c_str());
+    const std::string body = msg->body();
+    const std::string sender = from->name.empty() ? hex_prefix(from->pubkey) : from->name;
+    LOG_INFO("msg from %s (%zu bytes)", sender.c_str(), body.size());
+    LOG_TRACE("msg from %s: %s", sender.c_str(), body.c_str());
 
     StoredMessage stored;
     stored.is_channel = false;
     stored.sender_pubkey = from->pubkey;
     stored.timestamp = msg->timestamp;
     stored.txt_type = msg->txt_type;
-    stored.text = msg->body();
+    stored.text = body;
     stored.snr_q4 = static_cast<int8_t>(std::clamp(p.snr * 4.0f, -128.0f, 127.0f));
     stored.path_len = p.is_flood() ? 0xFF : static_cast<uint8_t>(p.hop_count());
     store_message(std::move(stored));
@@ -522,14 +523,16 @@ void Node::handle_group_text(const proto::Packet& p) {
         auto msg = proto::TextMessage::decode(*plain);
         if (!msg) continue;
 
-        LOG_INFO("channel %zu (%s): %s", index, ch->name.c_str(), msg->body().c_str());
+        const std::string body = msg->body();
+        LOG_INFO("channel %zu (%s): %zu bytes", index, ch->name.c_str(), body.size());
+        LOG_TRACE("channel %zu (%s): %s", index, ch->name.c_str(), body.c_str());
 
         StoredMessage stored;
         stored.is_channel = true;
         stored.channel_index = static_cast<uint8_t>(index);
         stored.timestamp = msg->timestamp;
         stored.txt_type = msg->txt_type;
-        stored.text = msg->body();
+        stored.text = body;
         stored.snr_q4 = static_cast<int8_t>(std::clamp(p.snr * 4.0f, -128.0f, 127.0f));
         stored.path_len = p.is_flood() ? 0xFF : static_cast<uint8_t>(p.hop_count());
         store_message(std::move(stored));

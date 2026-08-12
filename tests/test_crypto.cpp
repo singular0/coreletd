@@ -7,6 +7,9 @@
 #include "tests/test_util.h"
 #include "tests/vectors.h"
 
+#include <cstdio>
+#include <fstream>
+
 using namespace umc;
 using namespace umc::test;
 namespace tv = umc::testvec;
@@ -105,6 +108,34 @@ static void test_generate_avoids_reserved_ids() {
     }
 }
 
+static void test_identity_load_distinguishes_missing_and_invalid() {
+    const std::string path = "/tmp/umeshcore_test_identity";
+    std::remove(path.c_str());
+
+    std::string error;
+    CHECK(!crypto::LocalIdentity::load(path, error).has_value());
+    CHECK(error.empty());
+
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "not an identity\n";
+    }
+    CHECK(!crypto::LocalIdentity::load(path, error).has_value());
+    CHECK(!error.empty());
+
+    auto id = crypto::LocalIdentity::from_bytes(from_hex(tv::kPrivA));
+    CHECK(id.has_value());
+    if (id) {
+        CHECK(id->save(path));
+        auto loaded = crypto::LocalIdentity::load(path, error);
+        CHECK(loaded.has_value());
+        CHECK(error.empty());
+        if (loaded) CHECK_BYTES(loaded->pub(), id->pub());
+    }
+
+    std::remove(path.c_str());
+}
+
 int main() {
     if (!crypto::init()) return 2;
 
@@ -115,6 +146,7 @@ int main() {
     test_wrong_key_rejected();
     test_ack_hash();
     test_generate_avoids_reserved_ids();
+    test_identity_load_distinguishes_missing_and_invalid();
 
     return finish("crypto");
 }

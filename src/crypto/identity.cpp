@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 
 #include <cstdio>
+#include <cerrno>
 #include <cstring>
 #include <fstream>
 
@@ -84,17 +85,33 @@ std::optional<LocalIdentity> LocalIdentity::from_bytes(ByteView key) {
     return id;
 }
 
-std::optional<LocalIdentity> LocalIdentity::load(const std::string& path) {
+std::optional<LocalIdentity> LocalIdentity::load(const std::string& path, std::string& error) {
+    error.clear();
+    errno = 0;
     std::ifstream in(path, std::ios::binary);
-    if (!in) return std::nullopt;
+    if (!in) {
+        if (errno != ENOENT)
+            error = "cannot open " + path + ": " + std::strerror(errno ? errno : EIO);
+        return std::nullopt;
+    }
 
     std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (in.bad()) {
+        error = "cannot read " + path;
+        return std::nullopt;
+    }
     // Trim trailing whitespace so a hand-edited hex file with a newline works.
     while (!raw.empty() && (raw.back() == '\n' || raw.back() == '\r' || raw.back() == ' '))
         raw.pop_back();
 
-    if (auto bin = unhex(raw)) return from_bytes(*bin);
-    return from_bytes(ByteView(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()));
+    std::optional<LocalIdentity> id;
+    if (auto bin = unhex(raw)) {
+        id = from_bytes(*bin);
+    } else {
+        id = from_bytes(ByteView(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()));
+    }
+    if (!id) error = "invalid identity file " + path;
+    return id;
 }
 
 bool LocalIdentity::save(const std::string& path) const {

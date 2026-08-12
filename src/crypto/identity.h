@@ -31,8 +31,9 @@ public:
     static std::optional<LocalIdentity> from_bytes(ByteView key);
 
     // Text file holding the private key as 128 hex characters. Also accepts a
-    // raw binary 64/96-byte file. Written 0600.
-    static std::optional<LocalIdentity> load(const std::string& path);
+    // raw binary 64/96-byte file. Written 0600. A missing file returns nullopt
+    // with `error` empty; every other failure describes the problem in `error`.
+    static std::optional<LocalIdentity> load(const std::string& path, std::string& error);
     bool save(const std::string& path) const;
 
     ByteView pub() const { return pub_; }

@@ -29,11 +29,16 @@ bool App::ensure_state_dir() {
 }
 
 bool App::load_or_create_identity() {
-    if (auto id = crypto::LocalIdentity::load(cfg_.identity_path)) {
+    std::string error;
+    if (auto id = crypto::LocalIdentity::load(cfg_.identity_path, error)) {
         identity_ = std::make_unique<crypto::LocalIdentity>(*id);
         LOG_INFO("identity: loaded %s from %s", hex_prefix(identity_->pub()).c_str(),
                  cfg_.identity_path.c_str());
         return true;
+    }
+    if (!error.empty()) {
+        LOG_ERROR("identity: %s — refusing to replace the existing node key", error.c_str());
+        return false;
     }
 
     // No key yet: this is a first run.

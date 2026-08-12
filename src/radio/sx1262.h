@@ -48,7 +48,7 @@ public:
 
 private:
     // --- low level ---
-    bool wait_busy(uint32_t timeout_ms = 100);
+    bool wait_busy(uint32_t timeout_ms = 20);
     bool cmd(uint8_t opcode, ByteView args = {});
     bool cmd_read(uint8_t opcode, ByteSpan out);
     bool write_register(uint16_t addr, ByteView data);
@@ -62,6 +62,10 @@ private:
     // which on this board almost always means the LoRa rail is off.
     bool chip_responding();
     bool bring_up(std::string& error);
+    void start_recovery();
+    void release_reset();
+    void poll_reset_busy();
+    void recovery_failed(const std::string& error);
     void supervise();
     void go_down(const char* why);
 
@@ -94,10 +98,15 @@ private:
     EventLoop::WatchId irq_watch_ = 0;
     EventLoop::TimerId tx_timeout_ = 0;
     EventLoop::TimerId supervise_timer_ = 0;
+    EventLoop::TimerId recovery_timer_ = 0;
 
     bool tx_busy_ = false;
     uint32_t tx_started_ms_ = 0;
     bool healthy_ = false;
+    bool recovering_ = false;
+    bool ever_healthy_ = false;
+    bool initial_failure_reported_ = false;
+    uint32_t recovery_deadline_ms_ = 0;
 };
 
 }  // namespace umc::radio

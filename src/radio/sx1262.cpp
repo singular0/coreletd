@@ -62,6 +62,18 @@ constexpr uint16_t kIrqTimeout = 0x0200;
 constexpr uint8_t kPacketTypeLoRa = 0x01;
 constexpr uint8_t kStandbyRc = 0x00;
 
+// An unpowered module leaves MISO at all-zeroes or all-ones. A real SX126x
+// reports one of the five defined chip modes, plus three explicit command-error
+// values that must not be mistaken for a successful SPI transfer.
+bool command_status_ok(uint8_t opcode, uint8_t status) {
+    const uint8_t chip_mode = (status >> 4) & 0x07;
+    const uint8_t command_status = (status >> 1) & 0x07;
+    if (chip_mode >= 2 && chip_mode <= 6 && (command_status < 3 || command_status > 5))
+        return true;
+    LOG_DEBUG("sx1262: command 0x%02x returned error status 0x%02x", opcode, status);
+    return false;
+}
+
 void sleep_ms(uint32_t ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
 // LoRa bandwidth register values.
@@ -128,10 +140,15 @@ bool Sx1262::cmd(uint8_t opcode, ByteView args) {
     tx.push_back(opcode);
     tx.insert(tx.end(), args.begin(), args.end());
 
-    if (nss_line_) nss_line_->set(false);
-    bool ok = spi_.write(tx);
-    if (nss_line_) nss_line_->set(true);
-    return ok;
+    Bytes rx(tx.size(), 0);
+    if (nss_line_ && !nss_line_->set(false)) return false;
+    bool ok = spi_.transfer(tx, rx);
+    if (nss_line_ && !nss_line_->set(true)) ok = false;
+    if (!ok) return false;
+
+    // Write commands clock a status byte back while the first argument is
+    // sent. Commands in this driver all have at least one argument.
+    return args.empty() || command_status_ok(opcode, rx[1]);
 }
 
 bool Sx1262::cmd_read(uint8_t opcode, ByteSpan out) {
@@ -142,10 +159,11 @@ bool Sx1262::cmd_read(uint8_t opcode, ByteSpan out) {
     tx[0] = opcode;
     Bytes rx(tx.size(), 0);
 
-    if (nss_line_) nss_line_->set(false);
+    if (nss_line_ && !nss_line_->set(false)) return false;
     bool ok = spi_.transfer(tx, rx);
-    if (nss_line_) nss_line_->set(true);
+    if (nss_line_ && !nss_line_->set(true)) ok = false;
     if (!ok) return false;
+    if (!command_status_ok(opcode, rx[1])) return false;
 
     std::copy(rx.begin() + 2, rx.end(), out.begin());
     return true;
@@ -170,10 +188,11 @@ bool Sx1262::read_register(uint16_t addr, ByteSpan out) {
     tx[2] = static_cast<uint8_t>(addr);
     Bytes rx(tx.size(), 0);
 
-    if (nss_line_) nss_line_->set(false);
+    if (nss_line_ && !nss_line_->set(false)) return false;
     bool ok = spi_.transfer(tx, rx);
-    if (nss_line_) nss_line_->set(true);
+    if (nss_line_ && !nss_line_->set(true)) ok = false;
     if (!ok) return false;
+    if (!command_status_ok(kCmdReadRegister, rx[3])) return false;
 
     std::copy(rx.begin() + 4, rx.end(), out.begin());
     return true;
@@ -196,10 +215,11 @@ bool Sx1262::read_buffer(uint8_t offset, ByteSpan out) {
     tx[1] = offset;
     Bytes rx(tx.size(), 0);
 
-    if (nss_line_) nss_line_->set(false);
+    if (nss_line_ && !nss_line_->set(false)) return false;
     bool ok = spi_.transfer(tx, rx);
-    if (nss_line_) nss_line_->set(true);
+    if (nss_line_ && !nss_line_->set(true)) ok = false;
     if (!ok) return false;
+    if (!command_status_ok(kCmdReadBuffer, rx[2])) return false;
 
     std::copy(rx.begin() + 3, rx.end(), out.begin());
     return true;
@@ -215,9 +235,15 @@ bool Sx1262::reset_chip(std::string& error) {
         return false;
     }
     // Datasheet asks for at least 100 us low; be generous, this happens once.
-    reset_line_->set(false);
+    if (!reset_line_->set(false)) {
+        error = "could not assert the SX1262 reset line";
+        return false;
+    }
     sleep_ms(2);
-    reset_line_->set(true);
+    if (!reset_line_->set(true)) {
+        error = "could not release the SX1262 reset line";
+        return false;
+    }
     sleep_ms(20);
 
     if (!wait_busy(1000)) {
@@ -291,24 +317,117 @@ bool Sx1262::begin(EventLoop& loop, std::string& error) {
     // radio is down.
     irq_watch_ = loop.add_fd(irq_line_->fd(), POLLIN, [this](short) { on_irq(); });
 
-    if (bring_up(error)) {
+    if (retry_interval_ms_ == 0) {
+        if (!bring_up(error)) return false;
+        ever_healthy_ = true;
         LOG_INFO("sx1262: %s", describe().c_str());
-    } else {
-        if (retry_interval_ms_ == 0) return false;
-        LOG_WARN("sx1262: %s — retrying every %u s", error.c_str(), retry_interval_ms_ / 1000);
-        error.clear();
+        return true;
     }
 
-    // One timer covers both halves of the job: while the radio is up it checks
-    // that the chip is still there, and while it is down it tries to bring it
-    // back. The daemon keeps running either way.
-    if (retry_interval_ms_ > 0)
-        supervise_timer_ = loop.add_repeating(retry_interval_ms_, [this] { supervise(); });
+    // One timer covers both halves of supervision: while the radio is up it
+    // checks that the chip is still there, and while it is down it starts a
+    // recovery attempt. The attempt itself uses short one-shot timers so reset
+    // delays and a stuck BUSY line never block the daemon's event loop.
+    supervise_timer_ = loop.add_repeating(retry_interval_ms_, [this] { supervise(); });
+    start_recovery();
+    error.clear();
 
     return true;
 }
 
+void Sx1262::start_recovery() {
+    if (!loop_ || healthy_ || recovering_) return;
+    recovering_ = true;
+
+    if (!reset_line_) {
+        recovery_failed("no reset line configured");
+        return;
+    }
+    if (!reset_line_->set(false)) {
+        recovery_failed("could not assert the SX1262 reset line");
+        return;
+    }
+
+    recovery_timer_ = loop_->add_timer(2, [this] {
+        recovery_timer_ = 0;
+        release_reset();
+    });
+}
+
+void Sx1262::release_reset() {
+    if (!recovering_) return;
+    if (!reset_line_->set(true)) {
+        recovery_failed("could not release the SX1262 reset line");
+        return;
+    }
+
+    recovery_deadline_ms_ = millis() + 1000;
+    recovery_timer_ = loop_->add_timer(20, [this] {
+        recovery_timer_ = 0;
+        poll_reset_busy();
+    });
+}
+
+void Sx1262::poll_reset_busy() {
+    if (!recovering_) return;
+
+    const int busy = busy_line_ ? busy_line_->get() : 0;
+    if (busy < 0) {
+        recovery_failed("could not read the SX1262 BUSY line");
+        return;
+    }
+    if (busy > 0) {
+        if (static_cast<int32_t>(millis() - recovery_deadline_ms_) >= 0) {
+            recovery_failed("SX1262 did not release BUSY after reset — check the wiring");
+            return;
+        }
+        recovery_timer_ = loop_->add_timer(10, [this] {
+            recovery_timer_ = 0;
+            poll_reset_busy();
+        });
+        return;
+    }
+
+    std::string error;
+    if (!chip_responding()) {
+        recovery_failed("SX1262 is not answering — the LoRa power rail is most likely off");
+        return;
+    }
+    if (!configure(error)) {
+        recovery_failed(error);
+        return;
+    }
+    if (!set_rx_mode()) {
+        recovery_failed("could not put the radio into receive mode");
+        return;
+    }
+
+    const bool returning = ever_healthy_;
+    healthy_ = true;
+    recovering_ = false;
+    ever_healthy_ = true;
+    if (returning) {
+        LOG_INFO("sx1262: radio back up — %s", describe().c_str());
+    } else {
+        LOG_INFO("sx1262: %s", describe().c_str());
+    }
+}
+
+void Sx1262::recovery_failed(const std::string& error) {
+    recovering_ = false;
+    recovery_timer_ = 0;
+    if (txen_line_) txen_line_->set(false);
+    if (rxen_line_) rxen_line_->set(false);
+    if (!initial_failure_reported_) {
+        LOG_WARN("sx1262: %s — retrying every %u s", error.c_str(), retry_interval_ms_ / 1000);
+        initial_failure_reported_ = true;
+    } else {
+        LOG_DEBUG("sx1262: still down: %s", error.c_str());
+    }
+}
+
 void Sx1262::supervise() {
+    if (recovering_) return;
     if (healthy_) {
         // Don't poke the chip mid-transmission; the next tick will do it.
         if (tx_busy_ || chip_responding()) return;
@@ -316,12 +435,7 @@ void Sx1262::supervise() {
         return;
     }
 
-    std::string error;
-    if (!bring_up(error)) {
-        LOG_DEBUG("sx1262: still down: %s", error.c_str());
-        return;
-    }
-    LOG_INFO("sx1262: radio back up — %s", describe().c_str());
+    start_recovery();
 }
 
 void Sx1262::go_down(const char* why) {
@@ -330,7 +444,10 @@ void Sx1262::go_down(const char* why) {
     } else {
         LOG_ERROR("sx1262: %s", why);
     }
+    initial_failure_reported_ = true;
     healthy_ = false;
+    if (txen_line_) txen_line_->set(false);
+    if (rxen_line_) rxen_line_->set(false);
 
     // Release whatever was waiting on a transmission that will now never
     // complete, or the dispatcher would sit on a busy radio forever.
@@ -372,13 +489,14 @@ bool Sx1262::configure(std::string& error) {
         // Recalibrate everything now that the TCXO is running.
         if (!cmd(kCmdCalibrate, Bytes {0x7F})) return fail_with("Calibrate");
         sleep_ms(5);
-        if (!wait_busy(1000)) return fail_with("Calibrate (busy)");
+        if (!wait_busy()) return fail_with("Calibrate (busy)");
 
         // The chip tries to start its oscillator at power-up, before DIO3 is
         // driving the TCXO, so XOSC_START_ERR is latched on every cold boot and
         // means nothing by itself. Clear it here; a fault that is real will
         // latch again during the checks below.
-        cmd(kCmdClearDeviceErrors, Bytes {0x00, 0x00});
+        if (!cmd(kCmdClearDeviceErrors, Bytes {0x00, 0x00}))
+            return fail_with("ClearDeviceErrors");
     }
 
     if (!cmd(kCmdSetRegulatorMode, Bytes {0x01})) return fail_with("SetRegulatorMode");  // DC-DC
@@ -419,14 +537,16 @@ bool Sx1262::configure(std::string& error) {
     // Workaround from the datasheet errata: raise the TX clamp threshold to
     // avoid reduced power output on the high-power PA.
     uint8_t clamp = 0;
-    if (read_register(kRegTxClampConfig, ByteSpan(&clamp, 1))) {
-        clamp |= 0x1E;
-        write_register(kRegTxClampConfig, ByteView(&clamp, 1));
-    }
+    if (!read_register(kRegTxClampConfig, ByteSpan(&clamp, 1)))
+        return fail_with("read TX clamp configuration");
+    clamp |= 0x1E;
+    if (!write_register(kRegTxClampConfig, ByteView(&clamp, 1)))
+        return fail_with("write TX clamp configuration");
 
     // Over-current protection, in 2.5 mA steps.
     uint8_t ocp = static_cast<uint8_t>(std::min(params_.current_limit_ma / 2.5, 63.0));
-    write_register(kRegOcpConfig, ByteView(&ocp, 1));
+    if (!write_register(kRegOcpConfig, ByteView(&ocp, 1)))
+        return fail_with("over-current protection");
 
     int8_t power = static_cast<int8_t>(std::clamp(params_.tx_power_dbm, -9, 22));
     if (!cmd(kCmdSetTxParams, Bytes {static_cast<uint8_t>(power), 0x04 /* 200us ramp */}))
@@ -442,13 +562,14 @@ bool Sx1262::configure(std::string& error) {
     if (!write_register(kRegLoRaSyncWordMsb, sync)) return fail_with("sync word");
 
     uint8_t gain = params_.rx_boosted_gain ? 0x96 : 0x94;
-    write_register(kRegRxGain, ByteView(&gain, 1));
+    if (!write_register(kRegRxGain, ByteView(&gain, 1))) return fail_with("RX gain");
 
     if (!cmd(kCmdSetBufferBaseAddress, Bytes {0x00, 0x00}))
         return fail_with("SetBufferBaseAddress");
 
     // Fall back to standby (not FS) after TX/RX so the PA is not left biased.
-    cmd(kCmdSetRxTxFallbackMode, Bytes {0x20});
+    if (!cmd(kCmdSetRxTxFallbackMode, Bytes {0x20}))
+        return fail_with("SetRxTxFallbackMode");
 
     // Route everything we care about to DIO1.
     const uint16_t mask = kIrqTxDone | kIrqRxDone | kIrqCrcErr | kIrqHeaderErr | kIrqTimeout;
@@ -461,13 +582,12 @@ bool Sx1262::configure(std::string& error) {
     // Now that the TCXO has had time to settle and everything is programmed,
     // any error still latched is a genuine fault worth reporting.
     uint8_t errs[2] = {0, 0};
-    if (cmd_read(kCmdGetDeviceErrors, errs)) {
-        uint16_t e = static_cast<uint16_t>(errs[0] << 8 | errs[1]);
-        if (e & 0x0020)
-            LOG_WARN("sx1262: XOSC_START_ERR persists — check lora_tcxo matches the board "
-                     "(1.8 V on AIO v2); RX/TX may still work but frequency accuracy suffers");
-        if (e & ~0x0020) LOG_WARN("sx1262: device errors 0x%04x", e);
-    }
+    if (!cmd_read(kCmdGetDeviceErrors, errs)) return fail_with("GetDeviceErrors");
+    uint16_t e = static_cast<uint16_t>(errs[0] << 8 | errs[1]);
+    if (e & 0x0020)
+        LOG_WARN("sx1262: XOSC_START_ERR persists — check lora_tcxo matches the board "
+                 "(1.8 V on AIO v2); RX/TX may still work but frequency accuracy suffers");
+    if (e & ~0x0020) LOG_WARN("sx1262: device errors 0x%04x", e);
 
     return true;
 }
@@ -492,8 +612,8 @@ bool Sx1262::set_packet_params(uint8_t payload_len) {
 }
 
 bool Sx1262::set_rx_mode() {
-    if (rxen_line_) rxen_line_->set(true);
-    if (txen_line_) txen_line_->set(false);
+    if (txen_line_ && !txen_line_->set(false)) return false;
+    if (rxen_line_ && !rxen_line_->set(true)) return false;
 
     if (!cmd(kCmdClearIrqStatus, Bytes {0xFF, 0xFF})) return false;
     // 0xFFFFFF selects continuous receive.
@@ -508,20 +628,28 @@ bool Sx1262::send(ByteView data) {
     if (!healthy_ || tx_busy_) return false;
     if (data.empty() || data.size() > 255) return false;
 
-    if (!cmd(kCmdSetStandby, Bytes {kStandbyRc})) return false;
-    if (!set_packet_params(static_cast<uint8_t>(data.size()))) return false;
-    if (!cmd(kCmdSetBufferBaseAddress, Bytes {0x00, 0x00})) return false;
-    if (!write_buffer(0x00, data)) return false;
-    if (!cmd(kCmdClearIrqStatus, Bytes {0xFF, 0xFF})) return false;
+    auto io_failed = [this](const char* what) {
+        fail(what);
+        return false;
+    };
 
-    if (txen_line_) txen_line_->set(true);
-    if (rxen_line_) rxen_line_->set(false);
+    if (!cmd(kCmdSetStandby, Bytes {kStandbyRc})) return io_failed("entering standby");
+    if (!set_packet_params(static_cast<uint8_t>(data.size())))
+        return io_failed("setting TX packet parameters");
+    if (!cmd(kCmdSetBufferBaseAddress, Bytes {0x00, 0x00}))
+        return io_failed("setting the TX buffer address");
+    if (!write_buffer(0x00, data)) return io_failed("writing the TX buffer");
+    if (!cmd(kCmdClearIrqStatus, Bytes {0xFF, 0xFF}))
+        return io_failed("clearing IRQ status before TX");
+
+    if (rxen_line_ && !rxen_line_->set(false)) return io_failed("disabling the RX path");
+    if (txen_line_ && !txen_line_->set(true)) return io_failed("enabling the TX path");
 
     // No hardware timeout: we police it ourselves so a wedged chip surfaces as
     // a log line rather than a silent stall.
     if (!cmd(kCmdSetTx, Bytes {0x00, 0x00, 0x00})) {
         if (txen_line_) txen_line_->set(false);
-        return false;
+        return io_failed("starting TX");
     }
 
     tx_busy_ = true;
@@ -532,7 +660,7 @@ bool Sx1262::send(ByteView data) {
         if (!tx_busy_) return;
         LOG_ERROR("sx1262: transmit timed out, resetting to receive");
         tx_busy_ = false;
-        set_rx_mode();
+        if (!set_rx_mode()) fail("returning to RX after a TX timeout");
         deliver_tx_done(0);
     });
     return true;
@@ -559,7 +687,10 @@ void Sx1262::on_irq() {
     }
     LOG_TRACE("sx1262: irq 0x%04x", irq);
 
-    if (irq & kIrqTxDone) handle_tx_done();
+    if (irq & kIrqTxDone) {
+        handle_tx_done();
+        if (!healthy_) return;
+    }
 
     if (irq & kIrqRxDone) {
         // A CRC error means the packet is corrupt; count it and re-arm rather
@@ -567,12 +698,12 @@ void Sx1262::on_irq() {
         if (irq & (kIrqCrcErr | kIrqHeaderErr)) {
             LOG_DEBUG("sx1262: dropping packet with %s",
                       (irq & kIrqCrcErr) ? "CRC error" : "header error");
-            set_rx_mode();
+            if (!set_rx_mode()) fail("returning to RX after a corrupt packet");
         } else {
             handle_rx_done();
         }
     } else if (irq & (kIrqCrcErr | kIrqHeaderErr | kIrqTimeout)) {
-        set_rx_mode();
+        if (!set_rx_mode()) fail("returning to RX after an RX error");
     }
 }
 
@@ -583,7 +714,7 @@ void Sx1262::handle_tx_done() {
     if (txen_line_) txen_line_->set(false);
 
     uint32_t airtime = millis() - tx_started_ms_;
-    set_rx_mode();
+    if (!set_rx_mode()) fail("returning to RX after TX");
     deliver_tx_done(airtime);
 }
 
@@ -597,7 +728,7 @@ void Sx1262::handle_rx_done() {
     const uint8_t offset = buf_status[1];
 
     if (len == 0) {
-        set_rx_mode();
+        if (!set_rx_mode()) fail("returning to RX after an empty packet");
         return;
     }
 
@@ -610,29 +741,37 @@ void Sx1262::handle_rx_done() {
     uint8_t pkt_status[3] = {0, 0, 0};
     int rssi = 0;
     float snr = 0.0f;
-    if (cmd_read(kCmdGetPacketStatus, pkt_status)) {
-        rssi = -static_cast<int>(pkt_status[0]) / 2;
-        snr = static_cast<int8_t>(pkt_status[1]) / 4.0f;
+    if (!cmd_read(kCmdGetPacketStatus, pkt_status)) {
+        fail("reading packet status");
+        return;
     }
+    rssi = -static_cast<int>(pkt_status[0]) / 2;
+    snr = static_cast<int8_t>(pkt_status[1]) / 4.0f;
 
     // Re-arm before delivering: the handler may transmit, and it must find the
     // radio in a known state.
-    set_rx_mode();
+    if (!set_rx_mode()) {
+        fail("returning to RX after a packet");
+        return;
+    }
     deliver_rx(RxPacket {std::move(data), rssi, snr, millis()});
 }
 
 void Sx1262::fail(const char* what) {
-    LOG_ERROR("sx1262: SPI failure while %s", what);
-    go_down("radio marked down after an SPI failure");
+    LOG_ERROR("sx1262: radio I/O failure while %s", what);
+    go_down("radio marked down after an I/O failure");
 }
 
 void Sx1262::shutdown() {
     if (loop_) {
         if (irq_line_) loop_->remove_fd(irq_watch_);
         if (supervise_timer_) loop_->cancel_timer(supervise_timer_);
+        if (recovery_timer_) loop_->cancel_timer(recovery_timer_);
         if (tx_busy_) loop_->cancel_timer(tx_timeout_);
     }
     supervise_timer_ = 0;
+    recovery_timer_ = 0;
+    recovering_ = false;
     tx_busy_ = false;
 
     if (healthy_) {

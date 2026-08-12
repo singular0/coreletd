@@ -27,7 +27,6 @@ public:
 
     StateWriter(EventLoop& loop, ContactStore& contacts, ChannelStore& channels,
                 uint32_t coalesce_ms = kCoalesceMs);
-    ~StateWriter();
 
     // Arms the periodic sweep. Nothing is written before this is called.
     void start();
@@ -52,9 +51,10 @@ private:
     ChannelStore& channels_;
     uint32_t coalesce_ms_;
 
-    // 0 == not armed; the loop hands out ids from 1.
-    EventLoop::TimerId sweep_ = 0;
-    EventLoop::TimerId pending_ = 0;
+    // Both callbacks capture `this`, so holding the registrations here is what
+    // keeps them from outliving us.
+    EventLoop::Timer sweep_;
+    EventLoop::Timer pending_;
     bool healthy_ = true;
 };
 

@@ -5,20 +5,21 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 #include "util/clock.h"
 #include "util/log.h"
 
 namespace umc {
 
-EventLoop::WatchId EventLoop::add_fd(int fd, short events, FdCallback cb) {
+EventLoop::FdWatch EventLoop::add_fd(int fd, short events, FdCallback cb) {
     WatchId id = next_watch_++;
-    watches_[id] = Watch {fd, events, std::move(cb), false};
-    return id;
+    watches_[id] = WatchEntry {fd, events, std::move(cb), false};
+    return FdWatch(*this, id);
 }
 
-void EventLoop::update_fd(WatchId id, short events) {
-    auto it = watches_.find(id);
+void EventLoop::update_fd(const FdWatch& watch, short events) {
+    auto it = watches_.find(watch.id_);
     if (it != watches_.end()) it->second.events = events;
 }
 
@@ -31,17 +32,17 @@ void EventLoop::remove_fd(WatchId id) {
     dirty_ = true;
 }
 
-EventLoop::TimerId EventLoop::add_timer(uint32_t delay_ms, TimerCallback cb) {
+EventLoop::Timer EventLoop::add_timer(uint32_t delay_ms, TimerCallback cb) {
     TimerId id = next_timer_++;
-    timers_[id] = Timer {millis() + delay_ms, 0, std::move(cb), false};
-    return id;
+    timers_[id] = TimerEntry {millis() + delay_ms, 0, std::move(cb), false};
+    return Timer(*this, id);
 }
 
-EventLoop::TimerId EventLoop::add_repeating(uint32_t interval_ms, TimerCallback cb) {
+EventLoop::Timer EventLoop::add_repeating(uint32_t interval_ms, TimerCallback cb) {
     if (interval_ms == 0) interval_ms = 1;
     TimerId id = next_timer_++;
-    timers_[id] = Timer {millis() + interval_ms, interval_ms, std::move(cb), false};
-    return id;
+    timers_[id] = TimerEntry {millis() + interval_ms, interval_ms, std::move(cb), false};
+    return Timer(*this, id);
 }
 
 void EventLoop::cancel_timer(TimerId id) {

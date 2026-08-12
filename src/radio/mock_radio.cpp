@@ -18,7 +18,7 @@ bool MockRadio::begin(EventLoop& loop, std::string& error) {
         if (!load_replay(error)) return false;
         LOG_INFO("mock radio: replaying %zu packets from %s", replay_.size(),
                  opts_.replay_file.c_str());
-        loop.add_timer(opts_.first_delay_ms, [this] { replay_next(); });
+        replay_timer_ = loop.add_timer(opts_.first_delay_ms, [this] { replay_next(); });
     }
     LOG_WARN("mock radio in use — nothing is actually transmitted");
     return true;
@@ -58,7 +58,7 @@ void MockRadio::replay_next() {
         replay_pos_ = 0;
     }
     inject(replay_[replay_pos_++]);
-    loop_->add_timer(opts_.interval_ms, [this] { replay_next(); });
+    replay_timer_ = loop_->add_timer(opts_.interval_ms, [this] { replay_next(); });
 }
 
 void MockRadio::inject(Bytes data, int rssi, float snr) {
@@ -75,7 +75,7 @@ bool MockRadio::send(ByteView data) {
     tx_busy_ = true;
     // Hold the transmitter busy for the real airtime so timing-dependent logic
     // behaves the same as it will on hardware.
-    loop_->add_timer(airtime, [this, airtime] {
+    tx_timer_ = loop_->add_timer(airtime, [this, airtime] {
         tx_busy_ = false;
         deliver_tx_done(airtime);
     });

@@ -43,6 +43,8 @@ private:
     std::vector<Bytes> replay_;
     size_t replay_pos_ = 0;
     bool tx_busy_ = false;
+    EventLoop::Timer replay_timer_;
+    EventLoop::Timer tx_timer_;
 };
 
 }  // namespace umc::radio

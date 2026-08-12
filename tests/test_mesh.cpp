@@ -457,7 +457,7 @@ static void test_earlier_pump_replaces_later_timer() {
     CHECK_EQ(radio.send_count(), size_t {1});
     radio.complete_tx();
 
-    loop.add_timer(600, [&loop] { loop.stop(); });
+    auto deadline = loop.add_timer(600, [&loop] { loop.stop(); });
     loop.run();
     CHECK_EQ(radio.send_count(), size_t {2});
 }
@@ -586,7 +586,7 @@ static void test_retry_routes_like_the_first_send() {
     CHECK_EQ(dispatcher.stats().tx_dropped, uint32_t {1});
     radio.complete_tx();
 
-    loop.add_timer(5, [&loop] { loop.stop(); });
+    auto deadline = loop.add_timer(5, [&loop] { loop.stop(); });
     loop.run();
 
     CHECK_EQ(radio.send_count(), size_t {3});
@@ -746,7 +746,7 @@ static void test_state_writer_batches_deferred_saves() {
     CHECK(contacts.dirty());
     CHECK(channels.dirty());
 
-    loop.add_timer(30, [&loop] { loop.stop(); });
+    auto deadline = loop.add_timer(30, [&loop] { loop.stop(); });
     loop.run();
 
     // One pass covers every store that had changed, including the one whose

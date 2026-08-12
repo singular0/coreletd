@@ -110,6 +110,7 @@ private:
     Config cfg_;
     Delegate* delegate_ = nullptr;
 
+    EventLoop::Timer advert_timer_;
     ReliableSender sender_;
     MessageInbox inbox_;
 };

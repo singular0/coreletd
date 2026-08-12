@@ -122,7 +122,7 @@ endif()
 
 if(UMESHCORE_BUILD_TESTS)
     enable_testing()
-    foreach(t bytes crypto packet ini companion mesh)
+    foreach(t bytes crypto packet ini eventloop companion mesh)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE umeshcore_core)
         # Tests include their helpers as "tests/...", so the project root must

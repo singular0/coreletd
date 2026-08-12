@@ -95,10 +95,11 @@ private:
     std::unique_ptr<GpioLine> txen_line_;
 
     EventLoop* loop_ = nullptr;
-    EventLoop::WatchId irq_watch_ = 0;
-    EventLoop::TimerId tx_timeout_ = 0;
-    EventLoop::TimerId supervise_timer_ = 0;
-    EventLoop::TimerId recovery_timer_ = 0;
+    EventLoop::FdWatch irq_watch_;
+    EventLoop::Timer tx_timeout_;
+    EventLoop::Timer supervise_timer_;
+    // One at a time: each step of a recovery arms the next.
+    EventLoop::Timer recovery_timer_;
 
     bool tx_busy_ = false;
     uint32_t tx_started_ms_ = 0;

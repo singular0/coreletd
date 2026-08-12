@@ -58,8 +58,10 @@ private:
 
     int listen_fd_ = -1;
     int client_fd_ = -1;
-    EventLoop::WatchId listen_watch_ = 0;
-    EventLoop::WatchId client_watch_ = 0;
+    // Dropped before the matching fd is closed, so poll() never sees a
+    // descriptor that has since been handed to something else.
+    EventLoop::FdWatch listen_watch_;
+    EventLoop::FdWatch client_watch_;
 
     FrameReader reader_;
     Bytes out_buf_;

@@ -211,7 +211,6 @@ std::optional<ReliableSender::Completion> ReliableSender::complete(ByteView ack_
     if (it == pending_.end()) return std::nullopt;
 
     LOG_INFO("ack: %s confirmed after %u attempt(s)", hex(ack_hash).c_str(), it->attempt + 1);
-    loop_.cancel_timer(it->timer);
 
     Completion done {it->ack_hash, it->dest_pubkey};
     pending_.erase(it);

@@ -28,7 +28,8 @@ void Node::start() {
     });
 
     if (cfg_.advert_interval_s > 0) {
-        loop_.add_repeating(cfg_.advert_interval_s * 1000, [this] { send_advert(true); });
+        advert_timer_ =
+            loop_.add_repeating(cfg_.advert_interval_s * 1000, [this] { send_advert(true); });
     }
 }
 

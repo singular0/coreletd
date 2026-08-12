@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
-#include <vector>
+#include <utility>
 
 namespace umc {
 
@@ -20,17 +20,77 @@ public:
     using FdCallback = std::function<void(short revents)>;
     using TimerCallback = std::function<void()>;
 
-    using WatchId = uint64_t;
-    using TimerId = uint64_t;
+    enum class Kind { Fd, Timer };
 
-    // The fd is not owned; the caller closes it after removing the watch.
-    WatchId add_fd(int fd, short events, FdCallback cb);
-    void update_fd(WatchId id, short events);
-    void remove_fd(WatchId id);
+    // Owns one registration and deregisters when destroyed.
+    //
+    // Callbacks capture `this`, so the object that registers holds the handle
+    // as a member: the registration then cannot outlive what its callback
+    // captured, whatever order the owner's members happen to be destroyed in,
+    // and no destructor has to remember to cancel anything.
+    //
+    // Move-only. A default-constructed or moved-from handle is inert. The
+    // handle does not keep the loop alive and must not outlive it, so anything
+    // owning both declares the loop first — see `daemon/app.h`.
+    template <Kind K>
+    class Registration {
+    public:
+        Registration() = default;
+        ~Registration() { reset(); }
 
-    TimerId add_timer(uint32_t delay_ms, TimerCallback cb);
-    TimerId add_repeating(uint32_t interval_ms, TimerCallback cb);
-    void cancel_timer(TimerId id);
+        Registration(Registration&& other) noexcept
+            : loop_(std::exchange(other.loop_, nullptr)),
+              id_(std::exchange(other.id_, 0)) {}
+        Registration& operator=(Registration&& other) noexcept {
+            if (this != &other) {
+                reset();
+                loop_ = std::exchange(other.loop_, nullptr);
+                id_ = std::exchange(other.id_, 0);
+            }
+            return *this;
+        }
+
+        Registration(const Registration&) = delete;
+        Registration& operator=(const Registration&) = delete;
+
+        // Whether a registration is held, which is not the same as whether it
+        // is still pending: a one-shot timer that has already run still reads
+        // as true. Callbacks that track being armed reset the handle
+        // themselves, and doing so from inside the callback is fine.
+        explicit operator bool() const { return loop_ != nullptr; }
+
+        // Deregisters ahead of destruction. Cancelling something that has
+        // already fired is a no-op rather than a mistake — the loop hands out
+        // ids from a counter and never reuses one, so a stale id can only ever
+        // match the registration it came from.
+        void reset() {
+            if (!loop_) return;
+            EventLoop* loop = std::exchange(loop_, nullptr);
+            if constexpr (K == Kind::Fd) {
+                loop->remove_fd(id_);
+            } else {
+                loop->cancel_timer(id_);
+            }
+        }
+
+    private:
+        friend class EventLoop;
+        Registration(EventLoop& loop, uint64_t id) : loop_(&loop), id_(id) {}
+
+        EventLoop* loop_ = nullptr;
+        uint64_t id_ = 0;
+    };
+
+    using FdWatch = Registration<Kind::Fd>;
+    using Timer = Registration<Kind::Timer>;
+
+    // The fd is not owned. Drop the watch before closing the fd, or poll() will
+    // be handed a descriptor that may already have been reused.
+    [[nodiscard]] FdWatch add_fd(int fd, short events, FdCallback cb);
+    void update_fd(const FdWatch& watch, short events);
+
+    [[nodiscard]] Timer add_timer(uint32_t delay_ms, TimerCallback cb);
+    [[nodiscard]] Timer add_repeating(uint32_t interval_ms, TimerCallback cb);
 
     // Polled at the top of every iteration and after poll() is interrupted.
     // Returning true stops the loop. This is how a signal handler gets us out
@@ -44,26 +104,34 @@ public:
     bool stopping() const { return stop_; }
 
 private:
-    struct Watch {
+    using WatchId = uint64_t;
+    using TimerId = uint64_t;
+
+    struct WatchEntry {
         int fd = -1;
         short events = 0;
         FdCallback cb;
         bool dead = false;
     };
-    struct Timer {
+    struct TimerEntry {
         uint32_t due_ms = 0;
         uint32_t interval_ms = 0;  // 0 == one-shot
         TimerCallback cb;
         bool dead = false;
     };
 
+    // Only reachable through a Registration, which is what keeps an id from
+    // outliving the handle that owns it.
+    void remove_fd(WatchId id);
+    void cancel_timer(TimerId id);
+
     int next_timeout_ms() const;
     void run_due_timers();
     void reap();
 
     std::function<bool()> interrupt_check_;
-    std::map<WatchId, Watch> watches_;
-    std::map<TimerId, Timer> timers_;
+    std::map<WatchId, WatchEntry> watches_;
+    std::map<TimerId, TimerEntry> timers_;
     WatchId next_watch_ = 1;
     TimerId next_timer_ = 1;
     bool stop_ = false;

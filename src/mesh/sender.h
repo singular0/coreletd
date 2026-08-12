@@ -76,7 +76,8 @@ private:
         uint8_t txt_type = proto::kTxtPlain;
         uint32_t timestamp = 0;
         uint8_t attempt = 0;
-        EventLoop::TimerId timer = 0;
+        // Cancelled by dropping the entry, which is the only way a send ends.
+        EventLoop::Timer timer;
     };
 
     // Timers and transmit callbacks are armed for an operation that may have

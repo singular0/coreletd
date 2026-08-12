@@ -42,6 +42,9 @@ private:
     void log_status();
 
     Config cfg_;
+    // Declared before every subsystem, and so destroyed after all of them.
+    // Subsystems hold EventLoop registration handles that deregister on
+    // destruction, which they can only do while the loop is still alive.
     EventLoop loop_;
 
     std::unique_ptr<crypto::LocalIdentity> identity_;

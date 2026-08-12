@@ -363,7 +363,7 @@ void Sx1262::start_recovery() {
     }
 
     recovery_timer_ = loop_->add_timer(2, [this] {
-        recovery_timer_ = 0;
+        recovery_timer_.reset();
         release_reset();
     });
 }
@@ -377,7 +377,7 @@ void Sx1262::release_reset() {
 
     recovery_deadline_ms_ = millis() + 1000;
     recovery_timer_ = loop_->add_timer(20, [this] {
-        recovery_timer_ = 0;
+        recovery_timer_.reset();
         poll_reset_busy();
     });
 }
@@ -396,7 +396,7 @@ void Sx1262::poll_reset_busy() {
             return;
         }
         recovery_timer_ = loop_->add_timer(10, [this] {
-            recovery_timer_ = 0;
+            recovery_timer_.reset();
             poll_reset_busy();
         });
         return;
@@ -412,7 +412,7 @@ void Sx1262::poll_reset_busy() {
             return;
         }
         recovery_timer_ = loop_->add_timer(10, [this] {
-            recovery_timer_ = 0;
+            recovery_timer_.reset();
             poll_reset_busy();
         });
         return;
@@ -445,7 +445,7 @@ void Sx1262::poll_reset_busy() {
 
 void Sx1262::recovery_failed(const std::string& error) {
     recovering_ = false;
-    recovery_timer_ = 0;
+    recovery_timer_.reset();
     if (txen_line_) txen_line_->set(false);
     if (rxen_line_) rxen_line_->set(false);
     if (!initial_failure_reported_) {
@@ -483,7 +483,7 @@ void Sx1262::go_down(const char* why) {
     // complete, or the dispatcher would sit on a busy radio forever.
     if (tx_busy_) {
         tx_busy_ = false;
-        if (loop_) loop_->cancel_timer(tx_timeout_);
+        tx_timeout_.reset();
         deliver_tx_done(0);
     }
 }
@@ -740,7 +740,7 @@ void Sx1262::on_irq() {
 void Sx1262::handle_tx_done() {
     if (!tx_busy_) return;
     tx_busy_ = false;
-    loop_->cancel_timer(tx_timeout_);
+    tx_timeout_.reset();
     if (txen_line_) txen_line_->set(false);
 
     uint32_t airtime = millis() - tx_started_ms_;
@@ -793,14 +793,11 @@ void Sx1262::fail(const char* what) {
 }
 
 void Sx1262::shutdown() {
-    if (loop_) {
-        if (irq_line_) loop_->remove_fd(irq_watch_);
-        if (supervise_timer_) loop_->cancel_timer(supervise_timer_);
-        if (recovery_timer_) loop_->cancel_timer(recovery_timer_);
-        if (tx_busy_) loop_->cancel_timer(tx_timeout_);
-    }
-    supervise_timer_ = 0;
-    recovery_timer_ = 0;
+    // Before the GPIO lines go: the IRQ watch refers to a descriptor they own.
+    irq_watch_.reset();
+    supervise_timer_.reset();
+    recovery_timer_.reset();
+    tx_timeout_.reset();
     recovering_ = false;
     tx_busy_ = false;
 

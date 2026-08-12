@@ -79,7 +79,7 @@ bool Server::start(std::string& error) {
 void Server::shutdown() {
     if (client_fd_ >= 0) drop_client("shutting down");
     if (listen_fd_ >= 0) {
-        loop_.remove_fd(listen_watch_);
+        listen_watch_.reset();
         ::close(listen_fd_);
         listen_fd_ = -1;
     }
@@ -129,7 +129,7 @@ void Server::drop_client(const char* why) {
     if (client_fd_ < 0) return;
     LOG_INFO("companion: app disconnected (%s)", why);
 
-    loop_.remove_fd(client_watch_);
+    client_watch_.reset();
     ::close(client_fd_);
     client_fd_ = -1;
     reader_.reset();

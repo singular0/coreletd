@@ -29,6 +29,10 @@ public:
     std::string describe() const override { return "gated test radio"; }
 
     void set_ready(bool ready) { ready_ = ready; }
+    void complete_tx(uint32_t airtime_ms = 1) {
+        busy_ = false;
+        deliver_tx_done(airtime_ms);
+    }
     size_t send_count() const { return send_count_; }
 
 private:
@@ -345,6 +349,34 @@ static void test_identical_pending_messages_are_coalesced() {
     CHECK_EQ(dispatcher.queue_depth(), size_t {1});
 }
 
+static void test_earlier_pump_replaces_later_timer() {
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    proto::Packet packet;
+    packet.type = proto::PayloadType::Ack;
+    packet.payload = {1, 2, 3, 4};
+
+    // Queueing while the radio is down installs a one-second recheck.
+    CHECK(dispatcher.send(packet, kPriorityAck));
+    radio.set_ready(true);
+
+    // A new send pumps immediately. Completing it requests the normal jittered
+    // follow-up (at most 400 ms), which must replace that old one-second timer.
+    proto::Packet second = packet;
+    second.payload[0] = 5;
+    CHECK(dispatcher.send(std::move(second), kPriorityAck));
+    CHECK_EQ(radio.send_count(), size_t {1});
+    radio.complete_tx();
+
+    loop.add_timer(600, [&loop] { loop.stop(); });
+    loop.run();
+    CHECK_EQ(radio.send_count(), size_t {2});
+}
+
 int main() {
     if (!crypto::init()) return 2;
 
@@ -361,6 +393,7 @@ int main() {
     test_duty_cycle_includes_candidate_airtime();
     test_dispatch_result_waits_for_actual_transmission();
     test_identical_pending_messages_are_coalesced();
+    test_earlier_pump_replaces_later_timer();
 
     return finish("mesh");
 }

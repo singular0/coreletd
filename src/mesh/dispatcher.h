@@ -91,7 +91,8 @@ private:
 
     std::deque<Queued> queue_;
     uint64_t next_seq_ = 0;
-    bool pump_scheduled_ = false;
+    EventLoop::TimerId pump_timer_ = 0;
+    uint32_t pump_due_ms_ = 0;
 
     // dedup hash (4 bytes, packed into a u32) -> expiry in millis
     std::unordered_map<uint32_t, uint32_t> seen_;

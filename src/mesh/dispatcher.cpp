@@ -135,10 +135,19 @@ bool Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms,
 }
 
 void Dispatcher::schedule_pump(uint32_t delay_ms) {
-    if (pump_scheduled_) return;
-    pump_scheduled_ = true;
-    loop_.add_timer(delay_ms, [this] {
-        pump_scheduled_ = false;
+    uint32_t due = millis() + delay_ms;
+    if (pump_timer_ != 0) {
+        // Keep an existing timer only when it will wake us no later. A duty-
+        // cycle recheck may be tens of seconds away, while a newly queued ACK
+        // or a completed transmission needs another pump almost immediately.
+        if (static_cast<int32_t>(due - pump_due_ms_) >= 0) return;
+        loop_.cancel_timer(pump_timer_);
+    }
+
+    pump_due_ms_ = due;
+    pump_timer_ = loop_.add_timer(delay_ms, [this] {
+        pump_timer_ = 0;
+        pump_due_ms_ = 0;
         pump();
     });
 }

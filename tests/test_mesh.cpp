@@ -3,6 +3,9 @@
 #include "crypto/crypto.h"
 #include "mesh/channels.h"
 #include "mesh/contacts.h"
+#include "mesh/dispatcher.h"
+#include "mesh/node.h"
+#include "radio/mock_radio.h"
 #include "tests/packet_vectors.h"
 #include "tests/test_util.h"
 
@@ -201,6 +204,31 @@ static void test_by_id_returns_all_colliding_contacts() {
     CHECK_EQ(store.by_id(0x99).size(), size_t {0});
 }
 
+static void test_oversized_encrypted_messages_are_rejected() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore contacts(*self);
+    Contact& peer = contacts.upsert(from_hex(pv::kPubB));
+    ChannelStore channels;
+    EventLoop loop;
+    radio::RadioParams params;
+    radio::MockRadio radio(params, radio::MockRadio::Options {});
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
+    // 172 bytes plus the 5-byte text header pad to 192 encrypted bytes,
+    // making the direct envelope larger than the 184-byte payload limit.
+    CHECK(!node.send_text(peer, std::string(172, 'x'), proto::kTxtPlain, pv::kFixedTime));
+    CHECK_EQ(dispatcher.queue_depth(), size_t {0});
+
+    // Channel text also includes "name: " before encryption.
+    CHECK(!node.send_channel_text(0, std::string(172, 'x'), pv::kFixedTime));
+    CHECK_EQ(dispatcher.queue_depth(), size_t {0});
+}
+
 int main() {
     if (!crypto::init()) return 2;
 
@@ -212,6 +240,7 @@ int main() {
     test_advert_replay_is_rejected();
     test_shared_secret_is_cached_and_symmetric();
     test_by_id_returns_all_colliding_contacts();
+    test_oversized_encrypted_messages_are_rejected();
 
     return finish("mesh");
 }

@@ -104,7 +104,13 @@ void Dispatcher::expire_seen() {
     });
 }
 
-void Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms) {
+bool Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms) {
+    if (!p.valid()) {
+        LOG_ERROR("tx: refusing invalid packet: %s", p.describe().c_str());
+        stats_.tx_dropped++;
+        return false;
+    }
+
     uint32_t now = millis();
 
     // Anything we originate must not come back to us as "new" if a neighbour
@@ -124,6 +130,7 @@ void Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms) {
     queue_.insert(pos, std::move(q));
 
     pump();
+    return true;
 }
 
 void Dispatcher::schedule_pump(uint32_t delay_ms) {

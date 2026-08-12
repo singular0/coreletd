@@ -53,7 +53,9 @@ public:
 
     // Queues a packet. `delay_ms` defers the earliest transmit time, used to
     // stagger flood repeats so nearby nodes do not collide.
-    void send(proto::Packet p, uint8_t priority, uint32_t delay_ms = 0);
+    // Returns false without queueing when the packet cannot be represented on
+    // the wire. Callers that report command success must check this result.
+    bool send(proto::Packet p, uint8_t priority, uint32_t delay_ms = 0);
 
     // True if this packet was already seen recently; records it either way.
     bool check_and_mark_seen(const proto::Packet& p);

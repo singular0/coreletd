@@ -78,7 +78,7 @@ void Node::send_advert(bool flood) {
     dispatcher_.send(std::move(*p), kPriorityAdvert);
 }
 
-void Node::route_packet(proto::Packet& p, const Contact& to, uint8_t priority) {
+bool Node::route_packet(proto::Packet& p, const Contact& to, uint8_t priority) {
     if (to.path_known) {
         p.route = proto::RouteType::Direct;
         p.path = to.out_path;
@@ -87,7 +87,7 @@ void Node::route_packet(proto::Packet& p, const Contact& to, uint8_t priority) {
         p.route = proto::RouteType::Flood;
         p.path.clear();
     }
-    dispatcher_.send(std::move(p), priority);
+    return dispatcher_.send(std::move(p), priority);
 }
 
 std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8_t txt_type,
@@ -105,11 +105,6 @@ std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8
     msg.text = to_bytes(text);
 
     Bytes plaintext = msg.encode();
-    if (plaintext.size() > proto::kMaxPayloadSize - 4) {
-        LOG_ERROR("send: message too long (%zu bytes)", plaintext.size());
-        return std::nullopt;
-    }
-
     // Plain messages are acked against the sender's key; signed/room messages
     // against the recipient's.
     ByteView ack_key = txt_type == proto::kTxtSignedPlain ? ByteView(to.pubkey) : self_.pub();
@@ -119,7 +114,11 @@ std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8
     proto::Packet p;
     p.type = proto::PayloadType::TxtMsg;
     p.payload = env.encode();
-    route_packet(p, to, kPriorityDirect);
+    if (!route_packet(p, to, kPriorityDirect)) {
+        LOG_ERROR("send: message is too long after encryption and padding (%zu bytes)",
+                  text.size());
+        return std::nullopt;
+    }
 
     // CLI data is never acked, so there is nothing to retry.
     if (txt_type != proto::kTxtCliData) {
@@ -224,7 +223,11 @@ bool Node::send_channel_text(size_t channel_index, const std::string& text, uint
     p.payload = env.encode();
 
     LOG_INFO("send: channel %zu (%s): %s", channel_index, ch->name.c_str(), text.c_str());
-    dispatcher_.send(std::move(p), kPriorityFlood);
+    if (!dispatcher_.send(std::move(p), kPriorityFlood)) {
+        LOG_ERROR("send: channel message is too long after encryption and padding (%zu bytes)",
+                  text.size());
+        return false;
+    }
     return true;
 }
 

@@ -114,6 +114,15 @@ std::optional<Packet> Packet::decode(ByteView raw) {
     return p;
 }
 
+bool Packet::valid() const {
+    if (path_hash_size < 1 || path_hash_size > 3) return false;
+    if (path.size() > kMaxPathSize || path.size() % path_hash_size != 0) return false;
+    if (hop_count() > 63 || payload.size() > kMaxPayloadSize) return false;
+
+    const size_t transport_bytes = has_transport_codes() ? 4 : 0;
+    return 2 + transport_bytes + path.size() + payload.size() <= kMaxPacketSize;
+}
+
 Bytes Packet::encode() const {
     Bytes out;
     out.reserve(2 + 4 + path.size() + payload.size());

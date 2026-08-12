@@ -110,7 +110,7 @@ private:
     void on_retry(const Bytes& ack_hash);
 
     proto::AdvertAppData build_appdata() const;
-    void route_packet(proto::Packet& p, const Contact& to, uint8_t priority);
+    bool route_packet(proto::Packet& p, const Contact& to, uint8_t priority);
 
     struct Pending {
         Bytes ack_hash;

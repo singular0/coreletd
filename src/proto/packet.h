@@ -87,6 +87,10 @@ struct Packet {
     void pop_hop();
 
     static std::optional<Packet> decode(ByteView raw);
+    // Checks every representational limit before a packet is accepted for TX.
+    // This includes limits that encode() cannot signal, such as an unaligned
+    // path or an encrypted payload enlarged by block padding.
+    bool valid() const;
     Bytes encode() const;
 
     // Dedup key: covers the header type bits and the payload, but deliberately

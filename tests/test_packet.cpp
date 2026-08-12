@@ -256,6 +256,25 @@ static void test_malformed_packets_rejected() {
     CHECK(!Packet::decode(big).has_value());
 }
 
+static void test_outbound_packet_validation() {
+    Packet p;
+    p.type = PayloadType::TxtMsg;
+    p.payload.assign(kMaxPayloadSize, 0x55);
+    CHECK(p.valid());
+
+    p.payload.push_back(0x55);
+    CHECK(!p.valid());
+
+    p.payload.clear();
+    p.path_hash_size = 2;
+    p.path = {0x01};
+    CHECK(!p.valid());
+
+    p.path_hash_size = 4;
+    p.path.clear();
+    CHECK(!p.valid());
+}
+
 static void test_dedup_hash_ignores_path() {
     Packet a;
     a.type = PayloadType::TxtMsg;
@@ -290,6 +309,7 @@ int main() {
     test_path_manipulation();
     test_transport_codes();
     test_malformed_packets_rejected();
+    test_outbound_packet_validation();
     test_dedup_hash_ignores_path();
 
     return finish("packet");

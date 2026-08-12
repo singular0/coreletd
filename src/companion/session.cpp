@@ -30,6 +30,22 @@ uint16_t read_battery_mv() {
     return 0;
 }
 
+// The three ways a send can fail are three different things for the user to do
+// about it, so each gets its own protocol error rather than collapsing into one.
+uint8_t send_error_code(mesh::SendError err) {
+    switch (err) {
+        case mesh::SendError::NoSharedSecret:
+            return kErrBadState;  // the stored contact key is unusable
+        case mesh::SendError::PendingFull:
+            return kErrTableFull;  // too many messages awaiting an ack
+        case mesh::SendError::TooLong:
+            return kErrIllegalArg;  // shorten the message and retry
+        case mesh::SendError::None:
+            break;
+    }
+    return kErrBadState;
+}
+
 void put_padded(Bytes& out, ByteView data, size_t width) {
     size_t n = std::min(data.size(), width);
     out.insert(out.end(), data.begin(), data.begin() + n);
@@ -343,8 +359,9 @@ Bytes Session::cmd_send_txt_msg(ByteView args) {
         return resp_err(kErrNotFound);
     }
 
-    auto ack = node_.send_text(*target, text, txt_type, timestamp);
-    if (!ack) return resp_err(kErrTableFull);
+    mesh::SendError err = mesh::SendError::None;
+    auto ack = node_.send_text(*target, text, txt_type, timestamp, &err);
+    if (!ack) return resp_err(send_error_code(err));
 
     last_send_ms_ = millis();
 

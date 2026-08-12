@@ -333,7 +333,9 @@ static void test_oversized_encrypted_messages_are_rejected() {
     Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
     // 172 bytes plus the 5-byte text header pad to 192 encrypted bytes,
     // making the direct envelope larger than the 184-byte payload limit.
-    CHECK(!node.send_text(peer, std::string(172, 'x'), proto::kTxtPlain, pv::kFixedTime));
+    SendError err = SendError::None;
+    CHECK(!node.send_text(peer, std::string(172, 'x'), proto::kTxtPlain, pv::kFixedTime, &err));
+    CHECK(err == SendError::TooLong);
     CHECK_EQ(dispatcher.queue_depth(), size_t {0});
 
     // Channel text also includes "name: " before encryption.
@@ -503,9 +505,44 @@ static void test_pending_send_limit_rejects_new_message() {
     Node::Config cfg;
     cfg.pending_send_limit = 1;
     Node node(loop, dispatcher, *self, contacts, channels, cfg);
-    CHECK(node.send_text(peer, "first", proto::kTxtPlain, pv::kFixedTime).has_value());
-    CHECK(!node.send_text(peer, "second", proto::kTxtPlain, pv::kFixedTime + 1).has_value());
+    SendError err = SendError::PendingFull;
+    CHECK(node.send_text(peer, "first", proto::kTxtPlain, pv::kFixedTime, &err).has_value());
+    // A successful send must clear the reason, not leave the caller's variable
+    // reading as the previous failure.
+    CHECK(err == SendError::None);
+    CHECK(!node.send_text(peer, "second", proto::kTxtPlain, pv::kFixedTime + 1, &err).has_value());
+    CHECK(err == SendError::PendingFull);
     CHECK_EQ(dispatcher.queue_depth(), size_t {1});
+}
+
+// The three ways a send can fail have to stay apart all the way to the caller:
+// the companion protocol turns each into a different error for the user, and
+// telling someone the contact table is full when their message was too long
+// sends them to fix the wrong thing.
+static void test_unusable_contact_key_is_reported_as_such() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore contacts(*self);
+    // All zeros is a small-order point, so no shared secret can be derived —
+    // but nothing rejects it on the way into the store, which is how a contact
+    // you cannot encrypt for comes to exist.
+    Contact& broken = *contacts.upsert(Bytes(crypto::kPubKeySize, 0));
+    CHECK(broken.shared_secret(*self).empty());
+
+    ChannelStore channels;
+    EventLoop loop;
+    radio::RadioParams params;
+    radio::MockRadio radio(params, radio::MockRadio::Options {});
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
+    SendError err = SendError::None;
+    CHECK(!node.send_text(broken, "hello", proto::kTxtPlain, pv::kFixedTime, &err));
+    CHECK(err == SendError::NoSharedSecret);
+    CHECK_EQ(dispatcher.queue_depth(), size_t {0});
 }
 
 // A retry is the same send with a higher attempt number, so it has to be built
@@ -783,6 +820,7 @@ int main() {
     test_earlier_pump_replaces_later_timer();
     test_dispatch_queue_drops_lowest_priority();
     test_pending_send_limit_rejects_new_message();
+    test_unusable_contact_key_is_reported_as_such();
     test_retry_routes_like_the_first_send();
     test_contact_references_survive_insertion();
     test_received_message_marks_store_dirty();

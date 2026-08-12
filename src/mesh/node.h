@@ -65,10 +65,11 @@ public:
     std::optional<proto::Packet> build_advert_packet(bool flood) const;
 
     // Sends a direct text message, retrying until acked. Returns the expected
-    // ack hash so the caller can correlate, or nullopt if it could not be sent.
+    // ack hash so the caller can correlate, or nullopt if it could not be sent,
+    // in which case `err` receives which of the failures it was.
     std::optional<Bytes> send_text(const Contact& to, const std::string& text, uint8_t txt_type,
-                                   uint32_t timestamp) {
-        return sender_.send(to, text, txt_type, timestamp);
+                                   uint32_t timestamp, SendError* err = nullptr) {
+        return sender_.send(to, text, txt_type, timestamp, err);
     }
     bool send_channel_text(size_t channel_index, const std::string& text, uint32_t timestamp);
 

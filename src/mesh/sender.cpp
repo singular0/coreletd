@@ -38,10 +38,11 @@ void ReliableSender::erase(uint64_t id) {
 }
 
 std::optional<Bytes> ReliableSender::send_attempt(Pending& pending, const Contact& to,
-                                                  bool force_flood) {
+                                                  bool force_flood, SendError* err) {
     const Bytes& shared = to.shared_secret(self_);
     if (shared.empty()) {
         LOG_ERROR("send: no shared secret for %s", hex_prefix(to.pubkey).c_str());
+        if (err) *err = SendError::NoSharedSecret;
         return std::nullopt;
     }
 
@@ -91,13 +92,16 @@ std::optional<Bytes> ReliableSender::send_attempt(Pending& pending, const Contac
     if (!route_to(dispatcher_, p, to, kPriorityDirect, flood, std::move(on_result))) {
         LOG_ERROR("send: %s is too long after encryption and padding (%zu bytes)",
                   hex(op_hash).c_str(), text_size);
+        if (err) *err = SendError::TooLong;
         return std::nullopt;
     }
     return ack_hash;
 }
 
 std::optional<Bytes> ReliableSender::send(const Contact& to, const std::string& text,
-                                          uint8_t txt_type, uint32_t timestamp) {
+                                          uint8_t txt_type, uint32_t timestamp, SendError* err) {
+    if (err) *err = SendError::None;
+
     // CLI data is never acked, so it carries no retry state.
     const bool acked = txt_type != proto::kTxtCliData;
 
@@ -117,6 +121,7 @@ std::optional<Bytes> ReliableSender::send(const Contact& to, const std::string& 
 
         if (pending_.size() >= pending_limit_) {
             LOG_WARN("send: pending message limit reached (%zu)", pending_limit_);
+            if (err) *err = SendError::PendingFull;
             return std::nullopt;
         }
     }
@@ -135,7 +140,7 @@ std::optional<Bytes> ReliableSender::send(const Contact& to, const std::string& 
     if (acked) pending_.push_back(std::move(pending));
     Pending& slot = acked ? pending_.back() : pending;
 
-    auto ack_hash = send_attempt(slot, to, /*force_flood=*/false);
+    auto ack_hash = send_attempt(slot, to, /*force_flood=*/false, err);
     if (!ack_hash) {
         if (acked) erase(id);
         return std::nullopt;

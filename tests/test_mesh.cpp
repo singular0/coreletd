@@ -5,6 +5,7 @@
 #include "mesh/channels.h"
 #include "mesh/contacts.h"
 #include "mesh/dispatcher.h"
+#include "mesh/inbox.h"
 #include "mesh/node.h"
 #include "radio/mock_radio.h"
 #include "tests/packet_vectors.h"
@@ -662,6 +663,27 @@ static void test_direct_ack_marks_store_dirty() {
     CHECK(contacts.dirty());
 }
 
+// The radio receives whether or not an app is connected, so the inbox is
+// bounded and drops the oldest message rather than growing. On its own that
+// takes three messages to demonstrate; through a node it took 257 packets.
+static void test_inbox_drops_oldest_when_full() {
+    MessageInbox inbox(2);
+    for (int i = 0; i < 3; i++) {
+        StoredMessage m;
+        m.text = std::to_string(i);
+        inbox.store(std::move(m));
+    }
+    CHECK_EQ(inbox.size(), size_t {2});
+
+    auto oldest = inbox.pop();
+    CHECK(oldest.has_value());
+    if (oldest) CHECK(oldest->text == "1");  // "0" was dropped, "1" was not
+
+    CHECK(inbox.pop().has_value());
+    CHECK(inbox.empty());
+    CHECK(!inbox.pop().has_value());
+}
+
 static void test_contact_limit_rejects_new_but_allows_update() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
@@ -700,6 +722,7 @@ int main() {
     test_contact_references_survive_insertion();
     test_received_message_marks_store_dirty();
     test_direct_ack_marks_store_dirty();
+    test_inbox_drops_oldest_when_full();
     test_contact_limit_rejects_new_but_allows_update();
 
     return finish("mesh");

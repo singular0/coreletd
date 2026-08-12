@@ -1,22 +1,14 @@
 #include "mesh/node.h"
 
 #include <algorithm>
-#include <iterator>
 
 #include "crypto/crypto.h"
+#include "mesh/routing.h"
 #include "util/clock.h"
 #include "util/hex.h"
 #include "util/log.h"
 
 namespace umc::mesh {
-
-namespace {
-// Retry schedule for unacked direct messages. MeshCore allows four attempts
-// (the attempt number is two bits); the last one escalates to flood routing
-// because a stale direct path is the usual reason an ack never arrives.
-constexpr uint32_t kRetryDelayMs[] = {8000, 16000, 32000};
-constexpr uint8_t kMaxAttempts = 4;
-}  // namespace
 
 Node::Node(EventLoop& loop, Dispatcher& dispatcher, const crypto::LocalIdentity& self,
            ContactStore& contacts, ChannelStore& channels, Config cfg)
@@ -25,7 +17,9 @@ Node::Node(EventLoop& loop, Dispatcher& dispatcher, const crypto::LocalIdentity&
       self_(self),
       contacts_(contacts),
       channels_(channels),
-      cfg_(std::move(cfg)) {}
+      cfg_(std::move(cfg)),
+      sender_(loop, dispatcher, self, contacts, cfg_.pending_send_limit),
+      inbox_(cfg_.message_queue_limit) {}
 
 void Node::start() {
     dispatcher_.set_rx_handler([this](proto::Packet&& p) { on_packet(std::move(p)); });
@@ -76,189 +70,6 @@ void Node::send_advert(bool flood) {
 
     LOG_INFO("advert: sending as \"%s\" (%s)", cfg_.name.c_str(), flood ? "flood" : "zero-hop");
     dispatcher_.send(std::move(*p), kPriorityAdvert);
-}
-
-bool Node::route_packet(proto::Packet& p, const Contact& to, uint8_t priority, bool force_flood,
-                        Dispatcher::TxResultHandler on_result) {
-    if (to.path_known && !force_flood) {
-        p.route = proto::RouteType::Direct;
-        p.path = to.out_path;
-        p.path_hash_size = 1;
-    } else {
-        p.route = proto::RouteType::Flood;
-        p.path.clear();
-    }
-    return dispatcher_.send(std::move(p), priority, 0, std::move(on_result));
-}
-
-std::optional<Bytes> Node::send_attempt(Pending& pending, const Contact& to, bool force_flood) {
-    const Bytes& shared = to.shared_secret(self_);
-    if (shared.empty()) {
-        LOG_ERROR("send: no shared secret for %s", hex_prefix(to.pubkey).c_str());
-        return std::nullopt;
-    }
-
-    proto::TextMessage msg;
-    msg.timestamp = pending.timestamp;
-    msg.txt_type = pending.txt_type;
-    // The attempt counter goes on the wire so the receiver can tell a retry
-    // from a genuine duplicate message.
-    msg.attempt = pending.attempt;
-    msg.text = to_bytes(pending.text);
-
-    Bytes plaintext = msg.encode();
-    // Plain messages are acked against the sender's key; signed/room messages
-    // against the recipient's.
-    ByteView ack_key =
-        pending.txt_type == proto::kTxtSignedPlain ? ByteView(to.pubkey) : self_.pub();
-    Bytes ack_hash = proto::message_ack_hash(plaintext, ack_key);
-
-    // Every attempt is acceptable in reply; the first one is the operation's
-    // identity, and what the caller was told to wait for.
-    if (pending.attempt == 0) pending.ack_hash = ack_hash;
-    pending.accepted_ack_hashes.push_back(ack_hash);
-
-    auto env = proto::DirectEnvelope::seal(to.id(), self_.pub()[0], shared, plaintext);
-    proto::Packet p;
-    p.type = proto::PayloadType::TxtMsg;
-    p.payload = env.encode();
-
-    const bool flood = force_flood || !to.path_known;
-    LOG_DEBUG("send: attempt %u for %s via %s", pending.attempt + 1,
-              hex(pending.ack_hash).c_str(), flood ? "flood" : "path");
-
-    // Everything below works from copies: an idle radio accepts the packet
-    // synchronously, so the transmission callback — and any node code it
-    // reaches — can run before route_packet() returns.
-    const Bytes op_hash = pending.ack_hash;
-    const size_t text_size = pending.text.size();
-    const uint64_t pending_id = pending.id;
-
-    // An unregistered send (CLI data) is never acked, so there is nothing to
-    // retry and no result to wait for.
-    Dispatcher::TxResultHandler on_result;
-    if (pending_id != 0) {
-        on_result = [this, pending_id](bool transmitted) {
-            on_tx_result(pending_id, transmitted);
-        };
-    }
-
-    if (!route_packet(p, to, kPriorityDirect, flood, std::move(on_result))) {
-        LOG_ERROR("send: %s is too long after encryption and padding (%zu bytes)",
-                  hex(op_hash).c_str(), text_size);
-        return std::nullopt;
-    }
-    return ack_hash;
-}
-
-std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8_t txt_type,
-                                     uint32_t timestamp) {
-    // CLI data is never acked, so it carries no retry state.
-    const bool acked = txt_type != proto::kTxtCliData;
-
-    if (acked) {
-        // Exact duplicate sends are one logical delivery. Sending the same wire
-        // packet twice would be suppressed by receivers' deduplication anyway,
-        // so coalesce it with the operation already waiting for this ACK.
-        auto duplicate = std::find_if(pending_.begin(), pending_.end(), [&](const Pending& pd) {
-            return pd.dest_pubkey == to.pubkey && pd.timestamp == timestamp &&
-                   pd.txt_type == txt_type && pd.text == text;
-        });
-        if (duplicate != pending_.end()) {
-            LOG_DEBUG("send: coalescing duplicate message awaiting ack %s",
-                      hex(duplicate->ack_hash).c_str());
-            return duplicate->ack_hash;
-        }
-
-        if (pending_.size() >= cfg_.pending_send_limit) {
-            LOG_WARN("send: pending message limit reached (%u)", cfg_.pending_send_limit);
-            return std::nullopt;
-        }
-    }
-
-    Pending pending;
-    pending.id = acked ? next_pending_id_++ : 0;
-    pending.dest_pubkey = to.pubkey;
-    pending.text = text;
-    pending.txt_type = txt_type;
-    pending.timestamp = timestamp;
-    pending.attempt = 0;
-
-    // Register before transmitting: an idle radio can accept the packet
-    // synchronously, and the retry timer is armed from the result callback.
-    const uint64_t pending_id = pending.id;
-    if (acked) pending_.push_back(std::move(pending));
-    Pending& slot = acked ? pending_.back() : pending;
-
-    auto ack_hash = send_attempt(slot, to, /*force_flood=*/false);
-    if (!ack_hash) {
-        if (acked) {
-            std::erase_if(pending_,
-                          [pending_id](const Pending& pd) { return pd.id == pending_id; });
-        }
-        return std::nullopt;
-    }
-
-    LOG_INFO("send: %zu bytes to %s (ack %s)", text.size(),
-             to.name.empty() ? hex_prefix(to.pubkey).c_str() : to.name.c_str(),
-             hex(*ack_hash).c_str());
-    return ack_hash;
-}
-
-void Node::on_tx_result(uint64_t pending_id, bool transmitted) {
-    auto it = std::find_if(pending_.begin(), pending_.end(),
-                           [pending_id](const Pending& p) { return p.id == pending_id; });
-    if (it == pending_.end()) return;  // acked while another callback was pending
-
-    if (transmitted) {
-        // The retry delay begins only once this attempt is genuinely on air,
-        // not while it is waiting for radio recovery or duty-cycle capacity.
-        queue_retry(pending_id);
-        return;
-    }
-
-    LOG_WARN("send: attempt %u for %s expired before transmission",
-             it->attempt + 1, hex(it->ack_hash).c_str());
-    // Advance on the next event-loop pass. This avoids re-entering Dispatcher
-    // while it is in the middle of dropping an expired queue entry.
-    it->timer = loop_.add_timer(1, [this, pending_id] { on_retry(pending_id); });
-}
-
-void Node::queue_retry(uint64_t pending_id) {
-    auto it = std::find_if(pending_.begin(), pending_.end(),
-                           [pending_id](const Pending& p) { return p.id == pending_id; });
-    if (it == pending_.end()) return;
-
-    uint32_t delay = kRetryDelayMs[std::min<size_t>(it->attempt, std::size(kRetryDelayMs) - 1)];
-    it->timer = loop_.add_timer(delay, [this, pending_id] { on_retry(pending_id); });
-}
-
-void Node::on_retry(uint64_t pending_id) {
-    auto it = std::find_if(pending_.begin(), pending_.end(),
-                           [pending_id](const Pending& p) { return p.id == pending_id; });
-    if (it == pending_.end()) return;  // acked in the meantime
-
-    it->attempt++;
-    if (it->attempt >= kMaxAttempts) {
-        LOG_WARN("send: giving up on %s after %u attempts", hex(it->ack_hash).c_str(),
-                 it->attempt);
-        pending_.erase(it);
-        return;
-    }
-
-    Contact* to = contacts_.find(it->dest_pubkey);
-    if (!to) {
-        pending_.erase(it);
-        return;
-    }
-
-    // Final attempt: fall back to flooding, since a stale direct path is the
-    // most likely reason we have not been acked.
-    const bool last = it->attempt == kMaxAttempts - 1;
-    if (!send_attempt(*it, *to, /*force_flood=*/last)) {
-        std::erase_if(pending_,
-                      [pending_id](const Pending& pd) { return pd.id == pending_id; });
-    }
 }
 
 bool Node::send_channel_text(size_t channel_index, const std::string& text, uint32_t timestamp) {
@@ -428,37 +239,27 @@ void Node::send_ack(const Contact& to, ByteView ack_hash) {
     p.payload.assign(ack_hash.begin(), ack_hash.end());
 
     LOG_DEBUG("ack: sending %s", hex(ack_hash).c_str());
-    route_packet(p, to, kPriorityAck);
+    route_to(dispatcher_, p, to, kPriorityAck);
 }
 
 void Node::handle_ack(const proto::Packet& p) {
     if (p.payload.size() < crypto::kAckHashSize) return;
     ByteView ack_hash = subview(p.payload, 0, crypto::kAckHashSize);
 
-    auto it = std::find_if(pending_.begin(), pending_.end(), [&](const Pending& pd) {
-        return std::any_of(pd.accepted_ack_hashes.begin(), pd.accepted_ack_hashes.end(),
-                           [&](const Bytes& sent_hash) {
-                               return crypto::equal(sent_hash, ack_hash);
-                           });
-    });
-    if (it == pending_.end()) {
+    auto done = sender_.complete(ack_hash);
+    if (!done) {
         LOG_TRACE("ack: %s does not match anything pending", hex(ack_hash).c_str());
         return;
     }
 
-    LOG_INFO("ack: %s confirmed after %u attempt(s)", hex(ack_hash).c_str(), it->attempt + 1);
-    loop_.cancel_timer(it->timer);
-
     // A direct-routed ack proves the path we used still works.
-    if (Contact* c = contacts_.find(it->dest_pubkey); c && p.is_direct()) {
+    if (Contact* c = contacts_.find(done->dest_pubkey); c && p.is_direct()) {
         contacts_.touch(*c);
     }
 
     // Notify the companion with the original hash returned by CMD_SEND_TXT,
     // even when a later retry's attempt-specific hash was acknowledged.
-    Bytes hash_copy = it->ack_hash;
-    pending_.erase(it);
-    if (delegate_) delegate_->on_ack(hash_copy);
+    if (delegate_) delegate_->on_ack(done->ack_hash);
 }
 
 void Node::handle_path(const proto::Packet& p) {
@@ -535,21 +336,8 @@ void Node::maybe_repeat(const proto::Packet& p) {
 }
 
 void Node::store_message(StoredMessage msg) {
-    messages_.push_back(std::move(msg));
-    // Bound the queue: if the app never collects, drop the oldest rather than
-    // grow without limit.
-    while (messages_.size() > cfg_.message_queue_limit) {
-        LOG_WARN("message queue full, dropping oldest");
-        messages_.pop_front();
-    }
+    inbox_.store(std::move(msg));
     if (delegate_) delegate_->on_message_stored();
-}
-
-std::optional<StoredMessage> Node::pop_message() {
-    if (messages_.empty()) return std::nullopt;
-    StoredMessage m = std::move(messages_.front());
-    messages_.pop_front();
-    return m;
 }
 
 }  // namespace umc::mesh

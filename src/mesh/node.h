@@ -1,29 +1,20 @@
 #pragma once
 
-#include <deque>
-#include <functional>
 #include <optional>
 #include <string>
 
 #include "mesh/channels.h"
 #include "mesh/contacts.h"
 #include "mesh/dispatcher.h"
+#include "mesh/inbox.h"
+#include "mesh/sender.h"
 #include "proto/payloads.h"
 
 namespace umc::mesh {
 
-// A message held for the companion app to collect with CMD_SYNC_NEXT_MESSAGE.
-struct StoredMessage {
-    bool is_channel = false;
-    Bytes sender_pubkey;      // direct messages
-    uint8_t channel_index = 0;  // channel messages
-    uint32_t timestamp = 0;
-    uint8_t txt_type = proto::kTxtPlain;
-    std::string text;
-    int8_t snr_q4 = 0;  // SNR * 4, as the companion protocol carries it
-    uint8_t path_len = 0xFF;  // 0xFF == arrived by flood
-};
-
+// Routes between the radio and the companion app: builds our adverts, decides
+// what each received payload means, and repeats flood traffic. Reliable
+// delivery lives in ReliableSender and the receive queue in MessageInbox.
 class Node {
 public:
     struct Config {
@@ -75,42 +66,23 @@ public:
 
     // Sends a direct text message, retrying until acked. Returns the expected
     // ack hash so the caller can correlate, or nullopt if it could not be sent.
-    std::optional<Bytes> send_text(Contact& to, const std::string& text, uint8_t txt_type,
-                                   uint32_t timestamp);
+    std::optional<Bytes> send_text(const Contact& to, const std::string& text, uint8_t txt_type,
+                                   uint32_t timestamp) {
+        return sender_.send(to, text, txt_type, timestamp);
+    }
     bool send_channel_text(size_t channel_index, const std::string& text, uint32_t timestamp);
 
     // Asks a contact for its route back to us, which populates their path.
     bool send_path_discovery(Contact& to);
 
     // --- inbound message queue -----------------------------------------
-    bool has_messages() const { return !messages_.empty(); }
-    std::optional<StoredMessage> pop_message();
-    size_t message_count() const { return messages_.size(); }
+    bool has_messages() const { return !inbox_.empty(); }
+    std::optional<StoredMessage> pop_message() { return inbox_.pop(); }
 
     // --- introspection --------------------------------------------------
     const DispatcherStats& stats() const { return dispatcher_.stats(); }
 
 private:
-    struct Pending {
-        // Local operation identity. ACK hashes are deliberately short wire
-        // identifiers and can collide, so callbacks and timers must never use
-        // them to choose which operation to advance. 0 marks a send with no
-        // retry state (CLI data), which is never registered in pending_.
-        uint64_t id = 0;
-        // The first hash is what the companion client was told to wait for.
-        // Retries change the attempt bits in the plaintext and therefore have
-        // different on-air ack hashes; keep all transmitted hashes so a late
-        // or bundled ack for any attempt can complete the original send.
-        Bytes ack_hash;
-        std::vector<Bytes> accepted_ack_hashes;
-        Bytes dest_pubkey;
-        std::string text;
-        uint8_t txt_type = proto::kTxtPlain;
-        uint32_t timestamp = 0;
-        uint8_t attempt = 0;
-        EventLoop::TimerId timer = 0;
-    };
-
     void on_packet(proto::Packet&& p);
 
     void handle_advert(const proto::Packet& p);
@@ -127,19 +99,7 @@ private:
     void send_ack(const Contact& to, ByteView ack_hash);
     void record_return_path(Contact& c, const proto::Packet& p);
 
-    void queue_retry(uint64_t pending_id);
-    void on_retry(uint64_t pending_id);
-    void on_tx_result(uint64_t pending_id, bool transmitted);
-
-    // Builds and transmits one attempt of a pending message — the initial send
-    // is attempt 0, retries are 1..kMaxAttempts-1. `force_flood` ignores a known
-    // path, which the last attempt uses. Returns the on-air ack hash of this
-    // attempt, or nullopt if the message could not be sealed or queued.
-    std::optional<Bytes> send_attempt(Pending& pending, const Contact& to, bool force_flood);
-
     proto::AdvertAppData build_appdata() const;
-    bool route_packet(proto::Packet& p, const Contact& to, uint8_t priority,
-                      bool force_flood = false, Dispatcher::TxResultHandler on_result = {});
 
     EventLoop& loop_;
     Dispatcher& dispatcher_;
@@ -149,9 +109,8 @@ private:
     Config cfg_;
     Delegate* delegate_ = nullptr;
 
-    std::deque<StoredMessage> messages_;
-    std::vector<Pending> pending_;
-    uint64_t next_pending_id_ = 1;
+    ReliableSender sender_;
+    MessageInbox inbox_;
 };
 
 }  // namespace umc::mesh

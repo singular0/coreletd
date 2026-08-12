@@ -111,6 +111,21 @@ std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8
     ByteView ack_key = txt_type == proto::kTxtSignedPlain ? ByteView(to.pubkey) : self_.pub();
     Bytes ack_hash = proto::message_ack_hash(plaintext, ack_key);
 
+    // Exact duplicate sends are one logical delivery. Sending the same wire
+    // packet twice would be suppressed by receivers' deduplication anyway, so
+    // coalesce it with the operation already waiting for this ACK.
+    if (txt_type != proto::kTxtCliData) {
+        auto duplicate = std::find_if(pending_.begin(), pending_.end(), [&](const Pending& pd) {
+            return pd.dest_pubkey == to.pubkey && pd.timestamp == timestamp &&
+                   pd.txt_type == txt_type && pd.text == text;
+        });
+        if (duplicate != pending_.end()) {
+            LOG_DEBUG("send: coalescing duplicate message awaiting ack %s",
+                      hex(duplicate->ack_hash).c_str());
+            return duplicate->ack_hash;
+        }
+    }
+
     auto env = proto::DirectEnvelope::seal(to.id(), self_.pub()[0], shared, plaintext);
     proto::Packet p;
     p.type = proto::PayloadType::TxtMsg;
@@ -119,8 +134,11 @@ std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8
     // CLI data is never acked, so there is nothing to retry. Acked messages
     // must be registered before route_packet(): an idle radio can accept the
     // packet synchronously and invoke the transmission callback immediately.
+    uint64_t pending_id = 0;
     if (txt_type != proto::kTxtCliData) {
         Pending pending;
+        pending.id = next_pending_id_++;
+        pending_id = pending.id;
         pending.ack_hash = ack_hash;
         pending.accepted_ack_hashes.push_back(ack_hash);
         pending.dest_pubkey = to.pubkey;
@@ -133,16 +151,15 @@ std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8
 
     Dispatcher::TxResultHandler on_result;
     if (txt_type != proto::kTxtCliData) {
-        on_result = [this, ack_hash](bool transmitted) {
-            on_tx_result(ack_hash, transmitted);
+        on_result = [this, pending_id](bool transmitted) {
+            on_tx_result(pending_id, transmitted);
         };
     }
     if (!route_packet(p, to, kPriorityDirect, std::move(on_result))) {
         LOG_ERROR("send: message is too long after encryption and padding (%zu bytes)",
                   text.size());
-        std::erase_if(pending_, [&](const Pending& pending) {
-            return pending.ack_hash == ack_hash;
-        });
+        std::erase_if(pending_,
+                      [pending_id](const Pending& pending) { return pending.id == pending_id; });
         return std::nullopt;
     }
 
@@ -152,42 +169,43 @@ std::optional<Bytes> Node::send_text(Contact& to, const std::string& text, uint8
     return ack_hash;
 }
 
-void Node::on_tx_result(const Bytes& ack_hash, bool transmitted) {
+void Node::on_tx_result(uint64_t pending_id, bool transmitted) {
     auto it = std::find_if(pending_.begin(), pending_.end(),
-                           [&](const Pending& p) { return p.ack_hash == ack_hash; });
+                           [pending_id](const Pending& p) { return p.id == pending_id; });
     if (it == pending_.end()) return;  // acked while another callback was pending
 
     if (transmitted) {
         // The retry delay begins only once this attempt is genuinely on air,
         // not while it is waiting for radio recovery or duty-cycle capacity.
-        queue_retry(ack_hash);
+        queue_retry(pending_id);
         return;
     }
 
     LOG_WARN("send: attempt %u for %s expired before transmission",
-             it->attempt + 1, hex(ack_hash).c_str());
+             it->attempt + 1, hex(it->ack_hash).c_str());
     // Advance on the next event-loop pass. This avoids re-entering Dispatcher
     // while it is in the middle of dropping an expired queue entry.
-    it->timer = loop_.add_timer(1, [this, ack_hash] { on_retry(ack_hash); });
+    it->timer = loop_.add_timer(1, [this, pending_id] { on_retry(pending_id); });
 }
 
-void Node::queue_retry(Bytes ack_hash) {
+void Node::queue_retry(uint64_t pending_id) {
     auto it = std::find_if(pending_.begin(), pending_.end(),
-                           [&](const Pending& p) { return p.ack_hash == ack_hash; });
+                           [pending_id](const Pending& p) { return p.id == pending_id; });
     if (it == pending_.end()) return;
 
     uint32_t delay = kRetryDelayMs[std::min<size_t>(it->attempt, std::size(kRetryDelayMs) - 1)];
-    it->timer = loop_.add_timer(delay, [this, ack_hash] { on_retry(ack_hash); });
+    it->timer = loop_.add_timer(delay, [this, pending_id] { on_retry(pending_id); });
 }
 
-void Node::on_retry(const Bytes& ack_hash) {
+void Node::on_retry(uint64_t pending_id) {
     auto it = std::find_if(pending_.begin(), pending_.end(),
-                           [&](const Pending& p) { return p.ack_hash == ack_hash; });
+                           [pending_id](const Pending& p) { return p.id == pending_id; });
     if (it == pending_.end()) return;  // acked in the meantime
 
     it->attempt++;
     if (it->attempt >= kMaxAttempts) {
-        LOG_WARN("send: giving up on %s after %u attempts", hex(ack_hash).c_str(), it->attempt);
+        LOG_WARN("send: giving up on %s after %u attempts", hex(it->ack_hash).c_str(),
+                 it->attempt);
         pending_.erase(it);
         return;
     }
@@ -229,17 +247,19 @@ void Node::on_retry(const Bytes& ack_hash) {
     if (last || !to->path_known) {
         p.route = proto::RouteType::Flood;
         p.path.clear();
-        LOG_DEBUG("send: retry %u for %s via flood", it->attempt, hex(ack_hash).c_str());
+        LOG_DEBUG("send: retry %u for %s via flood", it->attempt,
+                  hex(it->ack_hash).c_str());
     } else {
         p.route = proto::RouteType::Direct;
         p.path = to->out_path;
-        LOG_DEBUG("send: retry %u for %s via path", it->attempt, hex(ack_hash).c_str());
+        LOG_DEBUG("send: retry %u for %s via path", it->attempt,
+                  hex(it->ack_hash).c_str());
     }
     if (!dispatcher_.send(std::move(p), kPriorityDirect, 0,
-                          [this, ack_hash](bool transmitted) {
-                              on_tx_result(ack_hash, transmitted);
+                          [this, pending_id](bool transmitted) {
+                              on_tx_result(pending_id, transmitted);
                           })) {
-        LOG_ERROR("send: retry for %s could not be queued", hex(ack_hash).c_str());
+        LOG_ERROR("send: retry for %s could not be queued", hex(it->ack_hash).c_str());
         pending_.erase(it);
     }
 }

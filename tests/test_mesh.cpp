@@ -320,6 +320,31 @@ static void test_dispatch_result_waits_for_actual_transmission() {
     CHECK_EQ(dispatcher.queue_depth(), size_t {1});
 }
 
+static void test_identical_pending_messages_are_coalesced() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore contacts(*self);
+    Contact& peer = contacts.upsert(from_hex(pv::kPubB));
+    ChannelStore channels;
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
+    auto first = node.send_text(peer, "same message", proto::kTxtPlain, pv::kFixedTime);
+    auto duplicate = node.send_text(peer, "same message", proto::kTxtPlain, pv::kFixedTime);
+
+    CHECK(first.has_value());
+    CHECK(duplicate.has_value());
+    if (first && duplicate) CHECK_BYTES(*first, *duplicate);
+    // The second call joins the existing logical delivery instead of adding a
+    // wire duplicate that the receiving dispatcher would discard.
+    CHECK_EQ(dispatcher.queue_depth(), size_t {1});
+}
+
 int main() {
     if (!crypto::init()) return 2;
 
@@ -335,6 +360,7 @@ int main() {
     test_failed_store_saves_remain_dirty();
     test_duty_cycle_includes_candidate_airtime();
     test_dispatch_result_waits_for_actual_transmission();
+    test_identical_pending_messages_are_coalesced();
 
     return finish("mesh");
 }

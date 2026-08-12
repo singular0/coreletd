@@ -106,15 +106,19 @@ private:
     void send_ack(const Contact& to, ByteView ack_hash);
     void record_return_path(Contact& c, const proto::Packet& p);
 
-    void queue_retry(Bytes ack_hash);
-    void on_retry(const Bytes& ack_hash);
-    void on_tx_result(const Bytes& ack_hash, bool transmitted);
+    void queue_retry(uint64_t pending_id);
+    void on_retry(uint64_t pending_id);
+    void on_tx_result(uint64_t pending_id, bool transmitted);
 
     proto::AdvertAppData build_appdata() const;
     bool route_packet(proto::Packet& p, const Contact& to, uint8_t priority,
                       Dispatcher::TxResultHandler on_result = {});
 
     struct Pending {
+        // Local operation identity. ACK hashes are deliberately short wire
+        // identifiers and can collide, so callbacks and timers must never use
+        // them to choose which operation to advance.
+        uint64_t id = 0;
         // The first hash is what the companion client was told to wait for.
         // Retries change the attempt bits in the plaintext and therefore have
         // different on-air ack hashes; keep all transmitted hashes so a late
@@ -139,6 +143,7 @@ private:
 
     std::deque<StoredMessage> messages_;
     std::vector<Pending> pending_;
+    uint64_t next_pending_id_ = 1;
 };
 
 }  // namespace umc::mesh

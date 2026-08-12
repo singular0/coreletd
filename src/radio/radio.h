@@ -83,8 +83,9 @@ public:
     explicit DutyCycle(double percent) : percent_(percent) {}
 
     void record(uint32_t airtime_ms);
-    // Milliseconds to wait before transmitting again; 0 when clear to send.
-    uint32_t wait_ms() const;
+    // Milliseconds to wait before transmitting a packet with the given airtime;
+    // 0 only when that transmission also fits inside the rolling budget.
+    uint32_t wait_ms(uint32_t candidate_airtime_ms) const;
     double used_pct() const;
 
 private:

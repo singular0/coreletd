@@ -163,13 +163,6 @@ void Dispatcher::pump() {
         return;
     }
 
-    // Respect the regulatory duty cycle before anything else.
-    if (uint32_t wait = duty_.wait_ms(); wait > 0) {
-        LOG_WARN("tx: duty cycle at %.1f%%, holding off %u ms", duty_.used_pct(), wait);
-        schedule_pump(std::min(wait, 30000u));
-        return;
-    }
-
     // Honour the per-packet backoff.
     auto it = std::find_if(queue_.begin(), queue_.end(), [now](const Queued& q) {
         return static_cast<int32_t>(q.not_before_ms - now) <= 0;
@@ -182,10 +175,19 @@ void Dispatcher::pump() {
         return;
     }
 
+    Bytes raw = it->packet.encode();
+
+    // Include the selected packet itself in the regulatory duty-cycle check.
+    const uint32_t candidate_airtime = radio_.airtime_ms(raw.size());
+    if (uint32_t wait = duty_.wait_ms(candidate_airtime); wait > 0) {
+        LOG_WARN("tx: duty cycle at %.1f%%, holding off %u ms", duty_.used_pct(), wait);
+        schedule_pump(std::min(wait, 30000u));
+        return;
+    }
+
     Queued q = std::move(*it);
     queue_.erase(it);
 
-    Bytes raw = q.packet.encode();
     if (raw.size() > proto::kMaxPacketSize) {
         LOG_ERROR("tx: refusing oversized packet (%zu bytes): %s", raw.size(),
                   q.packet.describe().c_str());

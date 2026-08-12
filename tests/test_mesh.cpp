@@ -247,6 +247,23 @@ static void test_failed_store_saves_remain_dirty() {
     CHECK(channels.dirty());
 }
 
+static void test_duty_cycle_includes_candidate_airtime() {
+    radio::DutyCycle duty(1.0);  // 36,000 ms per rolling hour
+    duty.record(35900);
+
+    CHECK_EQ(duty.wait_ms(100), uint32_t {0});
+    CHECK(duty.wait_ms(101) > 0);
+
+    radio::DutyCycle several(1.0);
+    several.record(10000);
+    several.record(10000);
+    several.record(10000);
+    CHECK(several.wait_ms(7000) > 0);
+
+    radio::DutyCycle impossible(0.001);  // 36 ms per hour
+    CHECK(impossible.wait_ms(37) > 0);
+}
+
 int main() {
     if (!crypto::init()) return 2;
 
@@ -260,6 +277,7 @@ int main() {
     test_by_id_returns_all_colliding_contacts();
     test_oversized_encrypted_messages_are_rejected();
     test_failed_store_saves_remain_dirty();
+    test_duty_cycle_includes_candidate_airtime();
 
     return finish("mesh");
 }

@@ -53,23 +53,36 @@ double DutyCycle::used_pct() const {
     return 100.0 * static_cast<double>(total) / kWindowMs;
 }
 
-uint32_t DutyCycle::wait_ms() const {
+uint32_t DutyCycle::wait_ms(uint32_t candidate_airtime_ms) const {
     if (percent_ <= 0 || percent_ >= 100) return 0;
     prune();
-    if (entries_.empty()) return 0;
 
     uint64_t total = 0;
     for (const auto& e : entries_) total += e.airtime_ms;
 
     // Airtime allowed across the whole window.
     const double budget = kWindowMs * percent_ / 100.0;
-    if (static_cast<double>(total) < budget) return 0;
+    if (static_cast<double>(total + candidate_airtime_ms) <= budget) return 0;
 
-    // Over budget: wait until the oldest entry ages out of the window.
-    uint32_t oldest = entries_.front().at_ms;
-    int32_t elapsed = static_cast<int32_t>(millis() - oldest);
-    int32_t remaining = static_cast<int32_t>(kWindowMs) - elapsed;
-    return remaining > 0 ? static_cast<uint32_t>(remaining) : 0;
+    // No amount of waiting can make one packet larger than the whole budget.
+    // Keep it held rather than knowingly exceeding the configured limit.
+    if (static_cast<double>(candidate_airtime_ms) > budget) return kWindowMs;
+
+    // Wait until enough of the oldest entries have aged out for the candidate,
+    // not merely until one entry has gone. Several small transmissions may
+    // need to expire before a larger one fits.
+    const double excess = static_cast<double>(total + candidate_airtime_ms) - budget;
+    uint64_t released = 0;
+    const uint32_t now = millis();
+    for (const auto& e : entries_) {
+        released += e.airtime_ms;
+        if (static_cast<double>(released) < excess) continue;
+
+        int32_t elapsed = static_cast<int32_t>(now - e.at_ms);
+        int32_t remaining = static_cast<int32_t>(kWindowMs) - elapsed;
+        return remaining > 0 ? static_cast<uint32_t>(remaining) : 0;
+    }
+    return kWindowMs;
 }
 
 // ---------------------------------------------------------------------------

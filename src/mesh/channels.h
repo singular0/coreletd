@@ -41,10 +41,13 @@ public:
     std::vector<std::pair<size_t, Channel*>> by_hash(uint8_t hash);
 
     bool load(const std::string& path);
-    bool save(const std::string& path) const;
+    // Clears dirty state only after the replacement file is safely installed.
+    bool save(const std::string& path);
+    bool dirty() const { return dirty_; }
 
 private:
     std::vector<Channel> channels_;
+    bool dirty_ = false;
 };
 
 }  // namespace umc::mesh

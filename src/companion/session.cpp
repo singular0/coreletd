@@ -58,13 +58,12 @@ void Session::set_store_paths(std::string contacts_path, std::string channels_pa
     channels_path_ = std::move(channels_path);
 }
 
-void Session::save_contacts() {
-    if (!contacts_path_.empty()) contacts_.save(contacts_path_);
-    contacts_.clear_dirty();
+bool Session::save_contacts() {
+    return !contacts_path_.empty() && contacts_.save(contacts_path_);
 }
 
-void Session::save_channels() {
-    if (!channels_path_.empty()) channels_.save(channels_path_);
+bool Session::save_channels() {
+    return !channels_path_.empty() && channels_.save(channels_path_);
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +280,7 @@ Bytes Session::cmd_add_update_contact(ByteView args) {
     }
 
     contacts_.mark_dirty();
-    save_contacts();
+    if (!save_contacts()) return resp_err(kErrFileIoError);
     LOG_INFO("companion: contact %s (%s) added/updated", hex_prefix(c.pubkey).c_str(),
              c.name.c_str());
     return resp_ok();
@@ -290,7 +289,7 @@ Bytes Session::cmd_add_update_contact(ByteView args) {
 Bytes Session::cmd_remove_contact(ByteView args) {
     if (args.size() < crypto::kPubKeySize) return resp_err(kErrIllegalArg);
     if (!contacts_.remove(subview(args, 0, crypto::kPubKeySize))) return resp_err(kErrNotFound);
-    save_contacts();
+    if (!save_contacts()) return resp_err(kErrFileIoError);
     return resp_ok();
 }
 
@@ -303,7 +302,7 @@ Bytes Session::cmd_reset_path(ByteView args) {
     c->out_path.clear();
     c->path_known = false;
     contacts_.mark_dirty();
-    save_contacts();
+    if (!save_contacts()) return resp_err(kErrFileIoError);
     LOG_INFO("companion: reset path to %s", hex_prefix(c->pubkey).c_str());
     return resp_ok();
 }
@@ -440,7 +439,7 @@ Bytes Session::cmd_set_channel(ByteView args) {
         ch.secret.clear();
 
     channels_.set(index, std::move(ch));
-    save_channels();
+    if (!save_channels()) return resp_err(kErrFileIoError);
     LOG_INFO("companion: channel %u set", index);
     return resp_ok();
 }

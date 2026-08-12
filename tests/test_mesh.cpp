@@ -79,6 +79,7 @@ static void test_contact_store_roundtrip() {
 
     const std::string path = "/tmp/umeshcore_test_contacts";
     CHECK(store.save(path));
+    CHECK(!store.dirty());
 
     ContactStore reloaded(*self);
     CHECK(reloaded.load(path));
@@ -229,6 +230,23 @@ static void test_oversized_encrypted_messages_are_rejected() {
     CHECK_EQ(dispatcher.queue_depth(), size_t {0});
 }
 
+static void test_failed_store_saves_remain_dirty() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore contacts(*self);
+    contacts.upsert(from_hex(pv::kPubB));
+    CHECK(contacts.dirty());
+    CHECK(!contacts.save("/nonexistent/umeshcore/contacts"));
+    CHECK(contacts.dirty());
+
+    ChannelStore channels;
+    channels.set(1, Channel::from_hashtag("#persist"));
+    CHECK(channels.dirty());
+    CHECK(!channels.save("/nonexistent/umeshcore/channels"));
+    CHECK(channels.dirty());
+}
+
 int main() {
     if (!crypto::init()) return 2;
 
@@ -241,6 +259,7 @@ int main() {
     test_shared_secret_is_cached_and_symmetric();
     test_by_id_returns_all_colliding_contacts();
     test_oversized_encrypted_messages_are_rejected();
+    test_failed_store_saves_remain_dirty();
 
     return finish("mesh");
 }

@@ -47,6 +47,7 @@ const Channel* ChannelStore::at(size_t index) const {
 void ChannelStore::set(size_t index, Channel ch) {
     if (index >= channels_.size()) return;
     channels_[index] = std::move(ch);
+    dirty_ = true;
 }
 
 std::vector<std::pair<size_t, Channel*>> ChannelStore::by_hash(uint8_t hash) {
@@ -57,7 +58,7 @@ std::vector<std::pair<size_t, Channel*>> ChannelStore::by_hash(uint8_t hash) {
     return out;
 }
 
-bool ChannelStore::save(const std::string& path) const {
+bool ChannelStore::save(const std::string& path) {
     std::string tmp = path + ".tmp";
     std::ofstream out(tmp, std::ios::trunc);
     if (!out) {
@@ -73,8 +74,16 @@ bool ChannelStore::save(const std::string& path) const {
         out << i << '\t' << hex(channels_[i].secret) << '\t' << name << '\n';
     }
     out.close();
-    if (!out) return false;
-    return ::rename(tmp.c_str(), path.c_str()) == 0;
+    if (!out) {
+        LOG_ERROR("channels: write to %s failed", tmp.c_str());
+        return false;
+    }
+    if (::rename(tmp.c_str(), path.c_str()) != 0) {
+        LOG_ERROR("channels: cannot rename %s -> %s", tmp.c_str(), path.c_str());
+        return false;
+    }
+    dirty_ = false;
+    return true;
 }
 
 bool ChannelStore::load(const std::string& path) {
@@ -107,6 +116,7 @@ bool ChannelStore::load(const std::string& path) {
         channels_[i].name = name;
         channels_[i].secret = std::move(*secret);
     }
+    dirty_ = false;
     return true;
 }
 

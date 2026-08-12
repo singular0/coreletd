@@ -70,12 +70,12 @@ public:
     size_t size() const { return contacts_.size(); }
 
     bool load(const std::string& path);
-    bool save(const std::string& path) const;
+    // Clears dirty state only after the replacement file is safely installed.
+    bool save(const std::string& path);
     // Set when anything changed, so the daemon can persist lazily instead of
     // rewriting the file on every received packet.
     bool dirty() const { return dirty_; }
     void mark_dirty() { dirty_ = true; }
-    void clear_dirty() { dirty_ = false; }
 
 private:
     const crypto::LocalIdentity& self_;

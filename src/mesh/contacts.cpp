@@ -101,7 +101,7 @@ std::string sanitise(std::string s) {
 }
 }  // namespace
 
-bool ContactStore::save(const std::string& path) const {
+bool ContactStore::save(const std::string& path) {
     std::string tmp = path + ".tmp";
     std::ofstream out(tmp, std::ios::trunc);
     if (!out) {
@@ -127,6 +127,7 @@ bool ContactStore::save(const std::string& path) const {
         LOG_ERROR("contacts: cannot rename %s -> %s", tmp.c_str(), path.c_str());
         return false;
     }
+    dirty_ = false;
     return true;
 }
 

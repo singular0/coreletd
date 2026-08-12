@@ -63,8 +63,8 @@ private:
     Bytes self_info_frame() const;
     Bytes contact_frame(uint8_t code, const mesh::Contact& c) const;
 
-    void save_contacts();
-    void save_channels();
+    bool save_contacts();
+    bool save_channels();
 
     Server& server_;
     mesh::Node& node_;

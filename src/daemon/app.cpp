@@ -123,13 +123,11 @@ bool App::start() {
     session_->set_store_paths(cfg_.contacts_path, cfg_.channels_path);
     session_->attach();
 
-    // Persist contacts periodically as a safety net; the session also saves
-    // immediately after any command that mutates them.
+    // Persist stores periodically as a safety net; the session also saves
+    // immediately after any companion command that mutates them.
     loop_.add_repeating(60000, [this] {
-        if (contacts_->dirty()) {
-            contacts_->save(cfg_.contacts_path);
-            contacts_->clear_dirty();
-        }
+        if (contacts_->dirty()) contacts_->save(cfg_.contacts_path);
+        if (channels_->dirty()) channels_->save(cfg_.channels_path);
     });
 
     log_status();
@@ -157,6 +155,7 @@ void App::run() { loop_.run(); }
 void App::request_stop() {
     LOG_INFO("shutting down");
     if (contacts_ && contacts_->dirty()) contacts_->save(cfg_.contacts_path);
+    if (channels_ && channels_->dirty()) channels_->save(cfg_.channels_path);
     if (server_) server_->shutdown();
     if (radio_) radio_->shutdown();
     loop_.stop();

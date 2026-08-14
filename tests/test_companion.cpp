@@ -3,9 +3,9 @@
 #include "daemon/host_metrics.h"
 #include "tests/test_util.h"
 
-using namespace umc;
-using namespace umc::test;
-using namespace umc::companion;
+using namespace clt;
+using namespace clt::test;
+using namespace clt::companion;
 
 static Bytes make_frame(uint8_t marker, const Bytes& payload) {
     Bytes out {marker};
@@ -138,9 +138,9 @@ static void test_outbound_buffer_limit_is_overflow_safe() {
 // as a pair: a total smaller than the used part, or a used part that swallowed
 // the reserved blocks into a negative, would render as nonsense.
 static void test_host_metrics_storage_is_coherent() {
-    umc::HostMetrics::Info info;
+    clt::HostMetrics::Info info;
     info.model = "test";
-    umc::HostMetrics metrics(info, "/tmp");
+    clt::HostMetrics metrics(info, "/tmp");
 
     auto s = metrics.storage();
     CHECK(s.total_bytes > 0);
@@ -157,7 +157,7 @@ static void test_host_metrics_storage_is_coherent() {
 // An unreadable state directory must report zeros rather than whatever an
 // uninitialised statvfs left on the stack.
 static void test_host_metrics_storage_survives_a_bad_path() {
-    umc::HostMetrics metrics(umc::HostMetrics::Info {}, "/nonexistent/umeshcore/state");
+    clt::HostMetrics metrics(clt::HostMetrics::Info {}, "/nonexistent/coreletd/state");
     auto s = metrics.storage();
     CHECK_EQ(s.used_bytes, uint64_t {0});
     CHECK_EQ(s.total_bytes, uint64_t {0});

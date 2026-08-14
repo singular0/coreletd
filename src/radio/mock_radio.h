@@ -5,7 +5,7 @@
 
 #include "radio/radio.h"
 
-namespace umc::radio {
+namespace clt::radio {
 
 // Radio backend for running the daemon without hardware: transmissions are
 // logged and discarded, and packets can be replayed from a file of hex lines
@@ -47,4 +47,4 @@ private:
     EventLoop::Timer tx_timer_;
 };
 
-}  // namespace umc::radio
+}  // namespace clt::radio

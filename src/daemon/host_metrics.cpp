@@ -11,7 +11,7 @@
 
 #include "util/log.h"
 
-namespace umc {
+namespace clt {
 
 namespace {
 
@@ -74,4 +74,4 @@ HostMetrics::Storage HostMetrics::storage() const {
     return {used, total};
 }
 
-}  // namespace umc
+}  // namespace clt

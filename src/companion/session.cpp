@@ -7,7 +7,7 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-namespace umc::companion {
+namespace clt::companion {
 
 namespace {
 
@@ -533,4 +533,4 @@ void Session::on_raw_rx(const proto::Packet& p, ByteView raw) {
     reply(out);
 }
 
-}  // namespace umc::companion
+}  // namespace clt::companion

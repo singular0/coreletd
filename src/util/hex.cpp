@@ -1,6 +1,6 @@
 #include "util/hex.h"
 
-namespace umc {
+namespace clt {
 
 namespace {
 constexpr char kDigits[] = "0123456789abcdef";
@@ -39,4 +39,4 @@ std::optional<Bytes> unhex(std::string_view s) {
     return out;
 }
 
-}  // namespace umc
+}  // namespace clt

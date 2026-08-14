@@ -1,4 +1,4 @@
-# umeshcore
+# coreletd
 
 A MeshCore daemon for the [ClockworkPi uConsole](https://www.clockworkpi.com/uconsole) with the
 [HackerGadgets / OpenSourceSDRLab AIO v2](https://hackergadgets.com/products/uconsole-aio-v2)
@@ -66,19 +66,19 @@ hand:
 
 ```sh
 sudo apt install build-essential debhelper cmake pkgconf libsodium-dev libssl-dev libgpiod-dev
-tools/build-deb.sh                  # -> dist/umeshcore_0.1.0_arm64.deb
-sudo apt install ./dist/umeshcore_0.1.0_arm64.deb
+tools/build-deb.sh                  # -> dist/coreletd_0.1.0_arm64.deb
+sudo apt install ./dist/coreletd_0.1.0_arm64.deb
 ```
 
 From a non-Debian machine, `tools/build-deb.sh --docker` builds the same package for arm64 in a
 `debian:trixie` container (emulated, so expect it to be slow).
 
-The package installs the daemon, the udev rules and the systemd unit, and creates the `umeshcore`
-user and `meshcore` group for you. It deliberately **does not enable or start the service** — the
+The package installs the daemon, the udev rules and the systemd unit, and creates the `coreletd`
+user and `coreletd` group for you. It deliberately **does not enable or start the service** — the
 frequency is a legal question and an unfitted antenna is a hardware one, so review
-`/etc/umeshcore/umeshcored.ini` and then `systemctl enable --now umeshcored`. Upgrades restart the
-daemon if you enabled it. `/usr/share/doc/umeshcore/README.Debian` covers the rest, including why
-purging leaves your node identity in `/var/lib/umeshcore` alone.
+`/etc/coreletd/coreletd.ini` and then `systemctl enable --now coreletd`. Upgrades restart the
+daemon if you enabled it. `/usr/share/doc/coreletd/README.Debian` covers the rest, including why
+purging leaves your node identity in `/var/lib/coreletd` alone.
 
 ## Hardware setup
 
@@ -121,10 +121,10 @@ the rail mid-session logs a warning, holds the transmit queue, and reconnects on
 **4. Device access without root:**
 
 ```sh
-sudo groupadd -f -r meshcore
-sudo install -m 644 etc/99-umeshcore.rules /etc/udev/rules.d/
+sudo groupadd -f -r coreletd
+sudo install -m 644 etc/99-coreletd.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
-ls -l /dev/spidev1.0 /dev/gpiochip0     # -> crw-rw---- root meshcore
+ls -l /dev/spidev1.0 /dev/gpiochip0     # -> crw-rw---- root coreletd
 ```
 
 If `meshtasticd` is installed, stop and disable it — it will hold the same GPIO lines and the
@@ -133,34 +133,34 @@ daemon will fail with `EBUSY`.
 ## Configuring
 
 ```sh
-sudo install -D -m 644 etc/umeshcored.ini /etc/umeshcore/umeshcored.ini
-sudo nano /etc/umeshcore/umeshcored.ini
+sudo install -D -m 644 etc/coreletd.ini /etc/coreletd/coreletd.ini
+sudo nano /etc/coreletd/coreletd.ini
 ```
 
 `lora_freq` is **required and has no default** — which band you may transmit on is a legal question,
 not a technical one. Set the plan for your region (`869.618` for EU868, `910.525` for US915) and
 make sure every node on your mesh shares the same `lora_bw` / `lora_sf` / `lora_cr`.
 
-`etc/umeshcored.ini` documents every option.
+`etc/coreletd.ini` documents every option.
 
 ## Running
 
 ```sh
 # foreground, with the config in this repo
-./build/umeshcored --config etc/umeshcored.ini --verbose
+./build/coreletd --config etc/coreletd.ini --verbose
 
 # as a service
-sudo install -m 755 build/umeshcored /usr/sbin/umeshcored
-sudo install -m 644 etc/umeshcored.service /etc/systemd/system/
-sudo useradd -r -g meshcore -s /usr/sbin/nologin umeshcore
-sudo systemctl daemon-reload && sudo systemctl enable --now umeshcored
-journalctl -u umeshcored -f
+sudo install -m 755 build/coreletd /usr/sbin/coreletd
+sudo install -m 644 etc/coreletd.service /etc/systemd/system/
+sudo useradd -r -g coreletd -s /usr/sbin/nologin coreletd
+sudo systemctl daemon-reload && sudo systemctl enable --now coreletd
+journalctl -u coreletd -f
 ```
 
 Then point a client at `127.0.0.1:5000`, e.g. `meshcore-cli -t 127.0.0.1:5000`.
 
 On first run the daemon generates an Ed25519 identity and writes it to
-`/var/lib/umeshcore/identity` (mode 0600). **That file is your node** — back it up; deleting it
+`/var/lib/coreletd/identity` (mode 0600). **That file is your node** — back it up; deleting it
 gives you a new public key and every contact will see you as a stranger.
 
 ### Security

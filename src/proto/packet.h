@@ -4,7 +4,7 @@
 
 #include "util/bytes.h"
 
-namespace umc::proto {
+namespace clt::proto {
 
 // Wire limits from the MeshCore packet format. Firmware <= v1.12.0 drops
 // packets that exceed either, so we must never generate one that does.
@@ -101,4 +101,4 @@ struct Packet {
     std::string describe() const;
 };
 
-}  // namespace umc::proto
+}  // namespace clt::proto

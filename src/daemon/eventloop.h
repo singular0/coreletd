@@ -7,7 +7,7 @@
 #include <map>
 #include <utility>
 
-namespace umc {
+namespace clt {
 
 // Single-threaded poll() loop. poll() rather than epoll/kqueue so the same code
 // runs on the uConsole and on a dev machine; the fd count here is tiny (radio
@@ -138,4 +138,4 @@ private:
     bool dirty_ = false;  // a watch or timer was removed mid-dispatch
 };
 
-}  // namespace umc
+}  // namespace clt

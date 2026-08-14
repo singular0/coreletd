@@ -7,7 +7,7 @@
 #include "proto/packet.h"
 #include "util/bytes.h"
 
-namespace umc::proto {
+namespace clt::proto {
 
 // ---------------------------------------------------------------------------
 // Node advertisement
@@ -155,4 +155,4 @@ struct LoginRequest {
     std::string password;
 };
 
-}  // namespace umc::proto
+}  // namespace clt::proto

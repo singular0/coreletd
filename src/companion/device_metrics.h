@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-namespace umc::companion {
+namespace clt::companion {
 
 // What the app can ask about the machine we run on.
 //
@@ -39,4 +39,4 @@ public:
     virtual Storage storage() const = 0;
 };
 
-}  // namespace umc::companion
+}  // namespace clt::companion

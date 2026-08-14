@@ -11,7 +11,7 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-namespace umc::radio {
+namespace clt::radio {
 
 namespace {
 
@@ -828,4 +828,4 @@ std::string Sx1262::describe() const {
     return s;
 }
 
-}  // namespace umc::radio
+}  // namespace clt::radio

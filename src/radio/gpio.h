@@ -7,7 +7,7 @@ struct gpiod_chip;
 struct gpiod_line_request;
 struct gpiod_edge_event_buffer;
 
-namespace umc::radio {
+namespace clt::radio {
 
 // A single requested GPIO line. Each line gets its own request, which keeps
 // the SX1262's mixed directions (outputs, a polled BUSY input, and an
@@ -60,4 +60,4 @@ private:
     std::string path_;
 };
 
-}  // namespace umc::radio
+}  // namespace clt::radio

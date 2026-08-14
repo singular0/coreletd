@@ -10,12 +10,12 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 # the build, not silently produce a mock-radio-only binary.
 override_dh_auto_configure:
 	dh_auto_configure -- \
-		-DUMESHCORE_RADIO_SX1262=ON \
-		-DUMESHCORE_BUILD_TESTS=ON
+		-DCORELETD_RADIO_SX1262=ON \
+		-DCORELETD_BUILD_TESTS=ON
 
 # Installing must not start a radio. The frequency is a legal question and a
 # 22 dBm PA into an unfitted antenna is a hardware one, so the admin enables
-# the unit once /etc/umeshcore/umeshcored.ini is reviewed. Upgrades still
+# the unit once /etc/coreletd/coreletd.ini is reviewed. Upgrades still
 # restart it if they did.
 override_dh_installsystemd:
 	dh_installsystemd --no-enable

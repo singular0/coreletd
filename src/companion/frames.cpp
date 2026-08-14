@@ -3,7 +3,7 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-namespace umc::companion {
+namespace clt::companion {
 
 void FrameReader::feed(ByteView data) {
     buf_.insert(buf_.end(), data.begin(), data.end());
@@ -62,4 +62,4 @@ Bytes resp_ok(uint32_t value) {
 
 Bytes resp_err(uint8_t code) { return Bytes {kRespErr, code}; }
 
-}  // namespace umc::companion
+}  // namespace clt::companion

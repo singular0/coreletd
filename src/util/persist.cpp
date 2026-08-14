@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <cstring>
 
-namespace umc {
+namespace clt {
 
 namespace {
 
@@ -86,4 +86,4 @@ bool durable_replace(const std::string& tmp_path, const std::string& path,
     return sync_and_close(parent_fd, "directory " + parent, error);
 }
 
-}  // namespace umc
+}  // namespace clt

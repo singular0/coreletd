@@ -6,10 +6,10 @@
 
 #include "util/log.h"
 
-namespace umc::radio {
+namespace clt::radio {
 
 namespace {
-constexpr const char* kConsumer = "umeshcore";
+constexpr const char* kConsumer = "coreletd";
 constexpr size_t kEventBufferSize = 16;
 }  // namespace
 
@@ -161,4 +161,4 @@ std::unique_ptr<GpioLine> GpioChip::request_rising_edge(unsigned offset, std::st
     return request(offset, Mode::RisingEdge, false, error);
 }
 
-}  // namespace umc::radio
+}  // namespace clt::radio

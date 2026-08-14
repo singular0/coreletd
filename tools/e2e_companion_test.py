@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive umeshcored over the companion TCP protocol, as the MeshCore app would."""
+"""Drive coreletd over the companion TCP protocol, as the MeshCore app would."""
 import socket
 import struct
 import sys

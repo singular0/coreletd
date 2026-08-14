@@ -1,11 +1,11 @@
-.TH UMESHCORED 8 "2026-08-12" "umeshcore 0.1.0" "System Manager's Manual"
+.TH CORELETD 8 "2026-08-12" "coreletd 0.1.0" "System Manager's Manual"
 .SH NAME
-umeshcored \- MeshCore daemon for the ClockworkPi uConsole with AIO v2
+coreletd \- MeshCore daemon for the ClockworkPi uConsole with AIO v2
 .SH SYNOPSIS
-.B umeshcored
+.B coreletd
 .RI [ options ]
 .SH DESCRIPTION
-.B umeshcored
+.B coreletd
 drives the SX1262 LoRa transceiver on the HackerGadgets / OpenSourceSDRLab
 AIO v2 expansion board over
 .BR spidev (4)
@@ -26,7 +26,7 @@ loop.
 .TP
 .BR \-c ", " \-\-config " " \fIPATH\fR
 Read configuration from \fIPATH\fR instead of
-.IR /etc/umeshcore/umeshcored.ini .
+.IR /etc/coreletd/coreletd.ini .
 .TP
 .BR \-v ", " \-\-verbose
 Raise the log level to debug, overriding the configuration file. Repeat for
@@ -63,23 +63,23 @@ appears. The same check notices a rail switched off while running: transmits
 are held and the radio is brought back when power returns.
 .SH FILES
 .TP
-.I /etc/umeshcore/umeshcored.ini
+.I /etc/coreletd/coreletd.ini
 Configuration file.
 .TP
-.I /var/lib/umeshcore/identity
+.I /var/lib/coreletd/identity
 The node's Ed25519 signing key, generated on first start, mode 0600. This file
 .I is
 the node: back it up. Deleting it yields a new public key, and every contact
 will see the node as a stranger.
 .TP
-.I /var/lib/umeshcore/contacts
+.I /var/lib/coreletd/contacts
 .TQ
-.I /var/lib/umeshcore/channels
+.I /var/lib/coreletd/channels
 Learned contacts and configured channels.
 .TP
-.I /usr/lib/udev/rules.d/99\-umeshcore.rules
+.I /usr/lib/udev/rules.d/99\-coreletd.rules
 Grants the
-.B meshcore
+.B coreletd
 group access to the SPI bus and the GPIO character devices, so the daemon need
 not run as root.
 .SH SECURITY
@@ -96,7 +96,7 @@ cannot be loaded or the radio cannot be brought up, and 2 for a usage error.
 .BR journalctl (1),
 .BR spidev (4)
 .PP
-/usr/share/doc/umeshcore/README.Debian for uConsole setup, including the
+/usr/share/doc/coreletd/README.Debian for uConsole setup, including the
 device tree overlay the radio needs.
 .SH AUTHOR
 Denis Yantarev <denis.yantarev@gmail.com>

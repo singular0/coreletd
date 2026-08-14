@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace umc {
+namespace clt {
 
 // Atomically replaces `path` with an already flushed and closed temporary file.
 // The file is synced before the rename and the parent directory afterwards so
@@ -10,4 +10,4 @@ namespace umc {
 bool durable_replace(const std::string& tmp_path, const std::string& path,
                      std::string& error);
 
-}  // namespace umc
+}  // namespace clt

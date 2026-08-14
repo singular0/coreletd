@@ -8,7 +8,7 @@
 #include "mesh/state_writer.h"
 #include "radio/radio.h"
 
-namespace umc::companion {
+namespace clt::companion {
 
 // Translates companion-protocol frames into operations on the mesh node, and
 // pushes mesh events back to the app.
@@ -75,4 +75,4 @@ private:
     uint32_t last_send_ms_ = 0;
 };
 
-}  // namespace umc::companion
+}  // namespace clt::companion

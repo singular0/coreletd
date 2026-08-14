@@ -6,8 +6,8 @@
 #include "daemon/eventloop.h"
 #include "tests/test_util.h"
 
-using namespace umc;
-using namespace umc::test;
+using namespace clt;
+using namespace clt::test;
 
 namespace {
 

@@ -8,7 +8,7 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 namespace {
 // How long a packet stays in the dedup table. Long enough to cover a flood
@@ -257,4 +257,4 @@ void Dispatcher::on_radio_tx_done(uint32_t airtime_ms) {
     schedule_pump(1 + (r * kJitterMs) / 255);
 }
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

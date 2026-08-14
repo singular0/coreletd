@@ -8,7 +8,7 @@
 #include "proto/packet.h"
 #include "radio/radio.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 // Lower number == goes out sooner. The expiry of a queued packet is derived
 // from its priority, so low-priority traffic is dropped rather than delaying
@@ -107,4 +107,4 @@ private:
     DispatcherStats stats_;
 };
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

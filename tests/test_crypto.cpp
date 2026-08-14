@@ -10,9 +10,9 @@
 #include <cstdio>
 #include <fstream>
 
-using namespace umc;
-using namespace umc::test;
-namespace tv = umc::testvec;
+using namespace clt;
+using namespace clt::test;
+namespace tv = clt::testvec;
 
 static void test_public_key_derivation() {
     auto a = crypto::LocalIdentity::from_bytes(from_hex(tv::kPrivA));
@@ -109,7 +109,7 @@ static void test_generate_avoids_reserved_ids() {
 }
 
 static void test_identity_load_distinguishes_missing_and_invalid() {
-    const std::string path = "/tmp/umeshcore_test_identity";
+    const std::string path = "/tmp/coreletd_test_identity";
     std::remove(path.c_str());
 
     std::string error;

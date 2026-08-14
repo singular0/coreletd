@@ -8,10 +8,10 @@
 #include "tests/packet_vectors.h"
 #include "tests/test_util.h"
 
-using namespace umc;
-using namespace umc::test;
-using namespace umc::proto;
-namespace pv = umc::pktvec;
+using namespace clt;
+using namespace clt::test;
+using namespace clt::proto;
+namespace pv = clt::pktvec;
 
 static void test_advert_packet() {
     Bytes raw = from_hex(pv::kAdvertPacket);

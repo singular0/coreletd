@@ -4,7 +4,7 @@
 
 #include "companion/device_metrics.h"
 
-namespace umc {
+namespace clt {
 
 // DeviceMetrics for the machine the daemon is running on.
 //
@@ -29,4 +29,4 @@ private:
     std::string voltage_path_;
 };
 
-}  // namespace umc
+}  // namespace clt

@@ -7,7 +7,7 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-namespace umc::radio {
+namespace clt::radio {
 
 MockRadio::MockRadio(RadioParams params, Options opts)
     : params_(params), opts_(std::move(opts)) {}
@@ -87,4 +87,4 @@ std::string MockRadio::describe() const {
                    params_.sf, params_.bw_khz, params_.cr);
 }
 
-}  // namespace umc::radio
+}  // namespace clt::radio

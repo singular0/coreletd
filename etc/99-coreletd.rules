@@ -1,0 +1,13 @@
+# Grant the `coreletd` group access to the SPI bus and GPIO character devices,
+# so coreletd can drive the SX1262 without running as root.
+#
+# Install:
+#   sudo groupadd -f -r coreletd
+#   sudo install -m 644 99-coreletd.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Verify:  ls -l /dev/spidev1.0 /dev/gpiochip0   ->  crw-rw---- root coreletd
+
+SUBSYSTEM=="spidev", GROUP="coreletd", MODE="0660"
+SUBSYSTEM=="gpio", GROUP="coreletd", MODE="0660"
+KERNEL=="gpiochip[0-9]*", GROUP="coreletd", MODE="0660"

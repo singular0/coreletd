@@ -6,7 +6,7 @@
 
 #include "util/bytes.h"
 
-namespace umc {
+namespace clt {
 
 std::string hex(ByteView b);
 
@@ -15,4 +15,4 @@ std::string hex_prefix(ByteView b, size_t n = 6);
 
 std::optional<Bytes> unhex(std::string_view s);
 
-}  // namespace umc
+}  // namespace clt

@@ -7,7 +7,7 @@
 #include "crypto/crypto.h"
 #include "util/bytes.h"
 
-namespace umc::crypto {
+namespace clt::crypto {
 
 using PubKey = std::array<uint8_t, kPubKeySize>;
 using PrivKey = std::array<uint8_t, kPrivKeySize>;
@@ -56,4 +56,4 @@ private:
 
 bool verify(ByteView pub, ByteView msg, ByteView sig);
 
-}  // namespace umc::crypto
+}  // namespace clt::crypto

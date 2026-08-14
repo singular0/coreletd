@@ -12,10 +12,10 @@
 #include "tests/packet_vectors.h"
 #include "tests/test_util.h"
 
-using namespace umc;
-using namespace umc::test;
-using namespace umc::mesh;
-namespace pv = umc::pktvec;
+using namespace clt;
+using namespace clt::test;
+using namespace clt::mesh;
+namespace pv = clt::pktvec;
 
 class GatedRadio final : public radio::Radio {
 public:
@@ -102,7 +102,7 @@ static void test_contact_store_roundtrip() {
     CHECK(self.has_value());
     if (!self) return;
 
-    const std::string path = "/tmp/umeshcore_test_contacts";
+    const std::string path = "/tmp/coreletd_test_contacts";
     ContactStore store(*self, path);
     Bytes pub_b = from_hex(pv::kPubB);
 
@@ -141,7 +141,7 @@ static void test_contact_flood_vs_zero_hop_path_survives_reload() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
 
-    const std::string path = "/tmp/umeshcore_test_contacts2";
+    const std::string path = "/tmp/coreletd_test_contacts2";
     ContactStore store(*self, path);
     Bytes pub_b = from_hex(pv::kPubB);
     Bytes pub_a = from_hex(pv::kPubA);
@@ -175,7 +175,7 @@ static void test_contact_load_is_all_or_nothing() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
 
-    const std::string path = "/tmp/umeshcore_test_contacts_corrupt";
+    const std::string path = "/tmp/coreletd_test_contacts_corrupt";
     ContactStore store(*self, path);
     Bytes retained_key = from_hex(pv::kPubB);
     Contact* retained = store.upsert(retained_key);
@@ -185,7 +185,7 @@ static void test_contact_load_is_all_or_nothing() {
 
     {
         std::ofstream out(path, std::ios::trunc);
-        out << "# umeshcore contacts v1\n";
+        out << "# coreletd contacts v1\n";
         out << pv::kPubA << "\t1\t0\t100\t100\t0\t0\t-\tNew\n";
         // The old loader silently narrowed this to uint8_t and accepted the
         // first record, replacing the live store with partial state.
@@ -210,7 +210,7 @@ static void test_contact_load_is_all_or_nothing() {
 }
 
 static void test_channel_load_is_all_or_nothing() {
-    const std::string path = "/tmp/umeshcore_test_channels_corrupt";
+    const std::string path = "/tmp/coreletd_test_channels_corrupt";
     ChannelStore store(path);
     Channel retained = Channel::from_hashtag("#retained");
     store.set(1, retained);
@@ -218,7 +218,7 @@ static void test_channel_load_is_all_or_nothing() {
 
     {
         std::ofstream out(path, std::ios::trunc);
-        out << "# umeshcore channels v1\n";
+        out << "# coreletd channels v1\n";
         out << "2\t00112233445566778899aabbccddeeff\tNew\n";
         out << "3\tabcd\tShort key\n";
     }
@@ -233,7 +233,7 @@ static void test_channel_load_is_all_or_nothing() {
     // is an intentional clear, not damage inferred from a partial parse.
     {
         std::ofstream out(path, std::ios::trunc);
-        out << "# umeshcore channels v1\n";
+        out << "# coreletd channels v1\n";
         out << "2\t00112233445566778899aabbccddeeff\tOnly\n";
     }
     CHECK(store.load());
@@ -347,13 +347,13 @@ static void test_failed_store_saves_remain_dirty() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
 
-    ContactStore contacts(*self, "/nonexistent/umeshcore/contacts");
+    ContactStore contacts(*self, "/nonexistent/coreletd/contacts");
     contacts.upsert(from_hex(pv::kPubB));
     CHECK(contacts.dirty());
     CHECK(!contacts.save());
     CHECK(contacts.dirty());
 
-    ChannelStore channels("/nonexistent/umeshcore/channels");
+    ChannelStore channels("/nonexistent/coreletd/channels");
     channels.set(1, Channel::from_hashtag("#persist"));
     CHECK(channels.dirty());
     CHECK(!channels.save());
@@ -636,7 +636,7 @@ static void test_received_message_marks_store_dirty() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivB));
     if (!self) return;
 
-    const std::string path = "/tmp/umeshcore_test_contacts_touch";
+    const std::string path = "/tmp/coreletd_test_contacts_touch";
     ContactStore contacts(*self, path);
     Contact& peer = *contacts.upsert(from_hex(pv::kPubA));
     ChannelStore channels;
@@ -671,7 +671,7 @@ static void test_direct_ack_marks_store_dirty() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
 
-    const std::string path = "/tmp/umeshcore_test_contacts_ack";
+    const std::string path = "/tmp/coreletd_test_contacts_ack";
     ContactStore contacts(*self, path);
     Contact& peer = *contacts.upsert(from_hex(pv::kPubB));
     ChannelStore channels;
@@ -729,8 +729,8 @@ static void test_state_writer_batches_deferred_saves() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
 
-    const std::string contacts_path = "/tmp/umeshcore_test_writer_contacts";
-    const std::string channels_path = "/tmp/umeshcore_test_writer_channels";
+    const std::string contacts_path = "/tmp/coreletd_test_writer_contacts";
+    const std::string channels_path = "/tmp/coreletd_test_writer_channels";
 
     EventLoop loop;
     ContactStore contacts(*self, contacts_path);
@@ -774,8 +774,8 @@ static void test_state_writer_reports_failed_writes() {
     if (!self) return;
 
     EventLoop loop;
-    ContactStore contacts(*self, "/nonexistent/umeshcore/contacts");
-    ChannelStore channels("/nonexistent/umeshcore/channels");
+    ContactStore contacts(*self, "/nonexistent/coreletd/contacts");
+    ChannelStore channels("/nonexistent/coreletd/channels");
     StateWriter writer(loop, contacts, channels);
     CHECK(writer.healthy());
 

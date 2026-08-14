@@ -1,5 +1,5 @@
-umeshcore for Debian
-====================
+coreletd for Debian
+===================
 
 The service is installed but deliberately NOT enabled
 -----------------------------------------------------
@@ -9,13 +9,13 @@ on is a legal question, and transmitting into an unfitted antenna connector
 will damage the radio, so installing the package never starts it. Review the
 configuration first:
 
-    sudoedit /etc/umeshcore/umeshcored.ini
+    sudoedit /etc/coreletd/coreletd.ini
 
 `lora_freq` is required and has no built-in default; the shipped file leaves
 it unset. Set the plan for your region, fit an antenna, then:
 
-    sudo systemctl enable --now umeshcored
-    journalctl -u umeshcored -f
+    sudo systemctl enable --now coreletd
+    journalctl -u coreletd -f
 
 Upgrading the package restarts the daemon if you enabled it, and leaves it
 alone if you did not.
@@ -38,30 +38,30 @@ Before the first start
    to the radio on its next retry (lora_retry_interval, 10 seconds).
 
 3. Stop meshtasticd if it is installed -- it holds the same GPIO lines and
-   umeshcored will fail with EBUSY.
+   coreletd will fail with EBUSY.
 
-The package creates a system user `umeshcore` and a system group `meshcore`.
-The udev rules in /usr/lib/udev/rules.d/99-umeshcore.rules grant that group
-access to the SPI bus and the GPIO character devices. Adding yourself to
-`meshcore` lets you run the daemon by hand for debugging:
+The package creates a system user `coreletd` and a system group of the same
+name. The udev rules in /usr/lib/udev/rules.d/99-coreletd.rules grant that
+group access to the SPI bus and the GPIO character devices. Adding yourself
+to `coreletd` lets you run the daemon by hand for debugging:
 
-    sudo adduser "$USER" meshcore     # log out and back in
+    sudo adduser "$USER" coreletd     # log out and back in
 
 State, and what purging does not remove
 ---------------------------------------
 
 On first start the daemon generates an Ed25519 identity and writes it to
-/var/lib/umeshcore/identity (mode 0600). That file *is* your node: back it up.
+/var/lib/coreletd/identity (mode 0600). That file *is* your node: back it up.
 Deleting it gives you a new public key and every contact will see you as a
 stranger.
 
-For that reason purging the package leaves /var/lib/umeshcore, the `umeshcore`
-user and the `meshcore` group in place. Remove them by hand if you really mean
+For that reason purging the package leaves /var/lib/coreletd and the
+`coreletd` user and group in place. Remove them by hand if you really mean
 to discard the node identity:
 
-    sudo rm -rf /var/lib/umeshcore
-    sudo deluser umeshcore
-    sudo delgroup meshcore
+    sudo rm -rf /var/lib/coreletd
+    sudo deluser coreletd
+    sudo delgroup coreletd
 
 Companion protocol access
 -------------------------

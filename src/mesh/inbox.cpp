@@ -2,7 +2,7 @@
 
 #include "util/log.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 void MessageInbox::store(StoredMessage msg) {
     messages_.push_back(std::move(msg));
@@ -19,4 +19,4 @@ std::optional<StoredMessage> MessageInbox::pop() {
     return m;
 }
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

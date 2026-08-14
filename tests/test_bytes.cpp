@@ -1,8 +1,8 @@
 #include "tests/test_util.h"
 #include "util/bytes.h"
 
-using namespace umc;
-using namespace umc::test;
+using namespace clt;
+using namespace clt::test;
 
 static void test_reads_fields_in_order() {
     Bytes b;

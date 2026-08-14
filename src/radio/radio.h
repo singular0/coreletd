@@ -6,7 +6,7 @@
 #include "daemon/eventloop.h"
 #include "util/bytes.h"
 
-namespace umc::radio {
+namespace clt::radio {
 
 struct RxPacket {
     Bytes data;
@@ -101,4 +101,4 @@ private:
     mutable std::vector<Entry> entries_;
 };
 
-}  // namespace umc::radio
+}  // namespace clt::radio

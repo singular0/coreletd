@@ -4,7 +4,7 @@
 
 #include "util/bytes.h"
 
-namespace umc::companion {
+namespace clt::companion {
 
 // Command / response / push codes. These mirror the upstream MeshCore
 // companion firmware and must never be renumbered — the phone app, meshcore-cli
@@ -144,4 +144,4 @@ Bytes resp_ok();
 Bytes resp_ok(uint32_t value);
 Bytes resp_err(uint8_t code);
 
-}  // namespace umc::companion
+}  // namespace clt::companion

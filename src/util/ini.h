@@ -7,7 +7,7 @@
 #include <string_view>
 #include <vector>
 
-namespace umc {
+namespace clt {
 
 // Flat `key = value` config, matching the shape of the MeshCore Linux port's
 // meshcored.ini. `[section]` headers are supported and simply prefix subsequent
@@ -44,4 +44,4 @@ private:
     mutable std::vector<std::string> read_;
 };
 
-}  // namespace umc
+}  // namespace clt

@@ -7,7 +7,7 @@
 #include "radio/radio.h"
 #include "radio/spidev.h"
 
-namespace umc::radio {
+namespace clt::radio {
 
 // SX1262 driver over spidev + libgpiod, sized for the uConsole AIO v2 wiring:
 // SPI1/CE0, DIO1 on GPIO26, BUSY on GPIO24, RESET on GPIO25, DIO2 driving the
@@ -110,4 +110,4 @@ private:
     uint32_t recovery_deadline_ms_ = 0;
 };
 
-}  // namespace umc::radio
+}  // namespace clt::radio

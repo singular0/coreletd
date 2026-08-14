@@ -5,11 +5,11 @@
 #include "tests/test_util.h"
 #include "util/ini.h"
 
-using namespace umc;
-using namespace umc::test;
+using namespace clt;
+using namespace clt::test;
 
 static std::string write_temp(const std::string& body) {
-    std::string path = "/tmp/umeshcore_test_ini.ini";
+    std::string path = "/tmp/coreletd_test_ini.ini";
     std::ofstream out(path, std::ios::trunc);
     out << body;
     return path;
@@ -94,7 +94,7 @@ static void test_malformed_reports_error() {
 
     Ini missing;
     std::string e2;
-    CHECK(!missing.load("/nonexistent/path/umeshcore.ini", e2));
+    CHECK(!missing.load("/nonexistent/path/coreletd.ini", e2));
     CHECK(!e2.empty());
 }
 

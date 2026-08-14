@@ -8,7 +8,7 @@
 #include "mesh/contacts.h"
 #include "mesh/dispatcher.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 // Why a send could not be started. These stay distinguishable because the
 // companion protocol reports each one differently: telling a user the contact
@@ -109,4 +109,4 @@ private:
     uint64_t next_id_ = 1;
 };
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

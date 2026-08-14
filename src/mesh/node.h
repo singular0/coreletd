@@ -10,7 +10,7 @@
 #include "mesh/sender.h"
 #include "proto/payloads.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 // Routes between the radio and the companion app: builds our adverts, decides
 // what each received payload means, and repeats flood traffic. Reliable
@@ -18,7 +18,7 @@ namespace umc::mesh {
 class Node {
 public:
     struct Config {
-        std::string name = "umeshcore";
+        std::string name = "coreletd";
         uint8_t adv_type = proto::kAdvTypeChat;
         bool has_location = false;
         int32_t lat_e6 = 0;
@@ -115,4 +115,4 @@ private:
     MessageInbox inbox_;
 };
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

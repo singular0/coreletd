@@ -9,7 +9,7 @@
 #include "proto/payloads.h"
 #include "util/bytes.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 struct Contact {
     Bytes pubkey;  // 32
@@ -113,4 +113,4 @@ private:
     bool dirty_ = false;
 };
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

@@ -4,7 +4,7 @@
 
 #include "util/bytes.h"
 
-namespace umc::radio {
+namespace clt::radio {
 
 // Thin wrapper over the Linux spidev character device.
 class SpiDev {
@@ -25,4 +25,4 @@ private:
     uint32_t speed_hz_ = 0;
 };
 
-}  // namespace umc::radio
+}  // namespace clt::radio

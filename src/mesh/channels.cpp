@@ -10,7 +10,7 @@
 #include "util/log.h"
 #include "util/persist.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 uint8_t Channel::hash() const {
     if (!valid()) return 0;
@@ -72,7 +72,7 @@ bool ChannelStore::save() {
         LOG_ERROR("channels: cannot write %s", tmp.c_str());
         return false;
     }
-    out << "# umeshcore channels v1\n# index\tkey\tname\n";
+    out << "# coreletd channels v1\n# index\tkey\tname\n";
     for (size_t i = 0; i < channels_.size(); i++) {
         if (!channels_[i].valid()) continue;
         std::string name = channels_[i].name;
@@ -114,7 +114,7 @@ bool ChannelStore::load() {
     bool saw_header = false;
     while (std::getline(in, line)) {
         lineno++;
-        if (line == "# umeshcore channels v1") {
+        if (line == "# coreletd channels v1") {
             saw_header = true;
             continue;
         }
@@ -165,4 +165,4 @@ bool ChannelStore::load() {
     return true;
 }
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

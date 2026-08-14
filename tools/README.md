@@ -32,7 +32,7 @@ chmod 600 state/identity
 grep -o 'kAdvertPacket = "[0-9a-f]*"' tests/packet_vectors.h | sed 's/.*"\(.*\)"/\1/'  > packets.hex
 grep -o 'kTextPacket   = "[0-9a-f]*"' tests/packet_vectors.h | sed 's/.*"\(.*\)"/\1/' >> packets.hex
 
-./build/umeshcored --config test.ini &   # mock_radio = 1, mock_replay_file = packets.hex
+./build/coreletd --config test.ini &   # mock_radio = 1, mock_replay_file = packets.hex
 sleep 10                                 # let both packets play in
 python3 tools/e2e_companion_test.py 5999
 ```

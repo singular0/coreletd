@@ -8,7 +8,7 @@
 
 #include "util/log.h"
 
-namespace umc {
+namespace clt {
 
 namespace {
 
@@ -179,4 +179,4 @@ std::vector<std::string> Ini::unread_keys() const {
     return out;
 }
 
-}  // namespace umc
+}  // namespace clt

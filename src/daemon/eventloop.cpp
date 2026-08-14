@@ -10,7 +10,7 @@
 #include "util/clock.h"
 #include "util/log.h"
 
-namespace umc {
+namespace clt {
 
 EventLoop::FdWatch EventLoop::add_fd(int fd, short events, FdCallback cb) {
     WatchId id = next_watch_++;
@@ -156,4 +156,4 @@ void EventLoop::run() {
 
 void EventLoop::stop() { stop_ = true; }
 
-}  // namespace umc
+}  // namespace clt

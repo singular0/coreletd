@@ -7,7 +7,7 @@
 
 #include "util/log.h"
 
-namespace umc::crypto {
+namespace clt::crypto {
 
 bool init() {
     if (sodium_init() < 0) {
@@ -111,4 +111,4 @@ bool equal(ByteView a, ByteView b) {
     return sodium_memcmp(a.data(), b.data(), a.size()) == 0;
 }
 
-}  // namespace umc::crypto
+}  // namespace clt::crypto

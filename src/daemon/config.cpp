@@ -11,20 +11,20 @@
 
 #include "util/ini.h"
 
-namespace umc {
+namespace clt {
 
 namespace {
 
 std::string default_state_dir() {
     // Running as a system service: use the systemd StateDirectory. Running as a
     // user: fall back to the XDG data dir so no root is needed for a test run.
-    if (::geteuid() == 0) return "/var/lib/umeshcore";
+    if (::geteuid() == 0) return "/var/lib/coreletd";
 
     if (const char* xdg = ::getenv("XDG_DATA_HOME"); xdg && *xdg)
-        return std::string(xdg) + "/umeshcore";
+        return std::string(xdg) + "/coreletd";
     if (const char* home = ::getenv("HOME"); home && *home)
-        return std::string(home) + "/.local/share/umeshcore";
-    return "./umeshcore-state";
+        return std::string(home) + "/.local/share/coreletd";
+    return "./coreletd-state";
 }
 
 bool read_int(const Ini& ini, std::string_view key, int64_t def, int64_t min, int64_t max,
@@ -237,4 +237,4 @@ void Config::finalise() {
     if (channels_path.empty()) channels_path = state_dir + "/channels";
 }
 
-}  // namespace umc
+}  // namespace clt

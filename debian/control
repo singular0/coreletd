@@ -1,4 +1,4 @@
-Source: umeshcore
+Source: coreletd
 Section: comm
 Priority: optional
 Maintainer: Denis Yantarev <denis.yantarev@gmail.com>
@@ -11,13 +11,13 @@ Build-Depends: debhelper-compat (= 13),
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 
-Package: umeshcore
+Package: coreletd
 Architecture: linux-any
 Depends: ${shlibs:Depends},
          ${misc:Depends},
          adduser
 Description: MeshCore daemon for the ClockworkPi uConsole with AIO v2
- umeshcored drives the SX1262 LoRa transceiver on the HackerGadgets /
+ coreletd drives the SX1262 LoRa transceiver on the HackerGadgets /
  OpenSourceSDRLab AIO v2 expansion board directly over spidev and libgpiod,
  speaks the MeshCore mesh protocol, and exposes the companion protocol over
  TCP so the MeshCore phone/web app, meshcore-cli and meshtui can connect --

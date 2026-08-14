@@ -12,7 +12,7 @@
 #include "util/log.h"
 #include "util/persist.h"
 
-namespace umc::crypto {
+namespace clt::crypto {
 
 namespace {
 
@@ -217,4 +217,4 @@ bool verify(ByteView pub, ByteView msg, ByteView sig) {
     return crypto_sign_verify_detached(sig.data(), msg.data(), msg.size(), pub.data()) == 0;
 }
 
-}  // namespace umc::crypto
+}  // namespace clt::crypto

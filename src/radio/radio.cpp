@@ -4,7 +4,7 @@
 
 #include "util/clock.h"
 
-namespace umc::radio {
+namespace clt::radio {
 
 uint32_t Radio::airtime_ms(size_t bytes) const {
     const RadioParams& p = params();
@@ -77,4 +77,4 @@ uint32_t DutyCycle::wait_ms(uint32_t candidate_airtime_ms) const {
     return kWindowMs;
 }
 
-}  // namespace umc::radio
+}  // namespace clt::radio

@@ -8,7 +8,7 @@
 #include "proto/payloads.h"
 #include "util/bytes.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 // A message held for the companion app to collect with CMD_SYNC_NEXT_MESSAGE.
 struct StoredMessage {
@@ -44,4 +44,4 @@ private:
     size_t limit_;
 };
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

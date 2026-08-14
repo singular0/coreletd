@@ -4,7 +4,7 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-namespace umc::proto {
+namespace clt::proto {
 
 // ---------------------------------------------------------------------------
 // Advert
@@ -296,4 +296,4 @@ Bytes PathReturn::encode() const {
     return out;
 }
 
-}  // namespace umc::proto
+}  // namespace clt::proto

@@ -8,7 +8,7 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 namespace {
 // Retry schedule for unacked direct messages. MeshCore allows four attempts
@@ -217,4 +217,4 @@ std::optional<ReliableSender::Completion> ReliableSender::complete(ByteView ack_
     return done;
 }
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

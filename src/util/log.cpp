@@ -5,7 +5,7 @@
 #include <mutex>
 #include <vector>
 
-namespace umc {
+namespace clt {
 
 namespace {
 LogLevel g_level = LogLevel::Info;
@@ -72,4 +72,4 @@ std::string vformat(const char* fmt, ...) {
     return out;
 }
 
-}  // namespace umc
+}  // namespace clt

@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace umc {
+namespace clt {
 
 // Monotonic milliseconds since daemon start. Used for timers, retries and
 // duty-cycle accounting — never for anything that goes on the wire.
@@ -22,4 +22,4 @@ int64_t clock_offset();
 // us a plausible time at boot, or the app set it.
 bool clock_is_valid();
 
-}  // namespace umc
+}  // namespace clt

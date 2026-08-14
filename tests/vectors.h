@@ -4,7 +4,7 @@
 
 #include <string_view>
 
-namespace umc::testvec {
+namespace clt::testvec {
 
 inline constexpr std::string_view kSeedA = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 inline constexpr std::string_view kPrivA = "3d94eea49c580aef816935762be049559d6d1440dede12e6a125f1841fff8e6fa9d71862a3e5746b571be3d187b0041046f52ebd850c7cbd5fde8ee38473b649";
@@ -22,4 +22,4 @@ inline constexpr std::string_view kPlain = "hello mesh";
 inline constexpr std::string_view kPlain16 = "exactly16bytes!!";
 inline constexpr std::string_view kAckInput = "ack me";
 
-}  // namespace umc::testvec
+}  // namespace clt::testvec

@@ -5,7 +5,7 @@
 
 #include "util/bytes.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 // The well-known MeshCore public channel. Every node ships with this in slot 0
 // so a fresh install can talk to anyone.
@@ -53,4 +53,4 @@ private:
     bool dirty_ = false;
 };
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

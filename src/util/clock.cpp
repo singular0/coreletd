@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-namespace umc {
+namespace clt {
 
 namespace {
 const std::chrono::steady_clock::time_point g_start = std::chrono::steady_clock::now();
@@ -35,4 +35,4 @@ int64_t clock_offset() { return g_offset; }
 
 bool clock_is_valid() { return g_valid || unix_now() >= kPlausibleEpoch; }
 
-}  // namespace umc
+}  // namespace clt

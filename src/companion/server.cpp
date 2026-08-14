@@ -12,7 +12,7 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-namespace umc::companion {
+namespace clt::companion {
 
 bool outbound_buffer_has_capacity(size_t buffered, size_t next, size_t limit) {
     return buffered <= limit && next <= limit - buffered;
@@ -217,4 +217,4 @@ void Server::flush() {
     if (client_fd_ >= 0) loop_.update_fd(client_watch_, POLLIN);
 }
 
-}  // namespace umc::companion
+}  // namespace clt::companion

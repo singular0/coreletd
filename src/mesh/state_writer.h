@@ -6,7 +6,7 @@
 #include "mesh/channels.h"
 #include "mesh/contacts.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 // Decides when persisted state is written. The stores own their files and
 // track their own dirty flags; this owns the timing, so nothing else has to
@@ -58,4 +58,4 @@ private:
     bool healthy_ = true;
 };
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

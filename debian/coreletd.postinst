@@ -3,21 +3,22 @@ set -e
 
 case "$1" in
     configure)
-        # `meshcore` is the group the udev rules hand /dev/spidev1.0 and the
-        # GPIO chardevs to. It exists separately from the daemon's own user so
-        # an admin can join it and run umeshcored --verbose by hand.
-        if ! getent group meshcore >/dev/null; then
-            addgroup --system meshcore
+        # `coreletd` is the group the udev rules hand /dev/spidev1.0 and the
+        # GPIO chardevs to. It shares its name with the daemon's own user but
+        # is a separate entity, so an admin can join the group and run
+        # coreletd --verbose by hand without becoming that user.
+        if ! getent group coreletd >/dev/null; then
+            addgroup --system coreletd
         fi
 
-        # Home is /var/lib/umeshcore, but systemd's StateDirectory= creates and
+        # Home is /var/lib/coreletd, but systemd's StateDirectory= creates and
         # owns it at first start -- do not pre-create it here, so that a purge
         # never has to reason about who owns the node identity inside it.
-        if ! getent passwd umeshcore >/dev/null; then
-            adduser --system --ingroup meshcore \
-                    --home /var/lib/umeshcore --no-create-home \
-                    --gecos "umeshcore MeshCore daemon" \
-                    umeshcore
+        if ! getent passwd coreletd >/dev/null; then
+            adduser --system --ingroup coreletd \
+                    --home /var/lib/coreletd --no-create-home \
+                    --gecos "coreletd MeshCore daemon" \
+                    coreletd
         fi
 
         # udevd notices the new rules file on its own, but devices that already

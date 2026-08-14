@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the umeshcore Debian package.
+# Build the coreletd Debian package.
 #
 #   tools/build-deb.sh                 native build (run this on the uConsole)
 #   tools/build-deb.sh --docker        build for arm64 in a debian:trixie container
@@ -31,13 +31,13 @@ docker_build() {
         "$image" sh -eux -c "
             apt-get update -qq
             apt-get install -y --no-install-recommends $build_deps
-            mkdir -p /build/umeshcore
+            mkdir -p /build/coreletd
             tar -C /src --exclude=./build --exclude=./dist --exclude=./.git -cf - . |
-                tar -C /build/umeshcore -xf -
-            cd /build/umeshcore
+                tar -C /build/coreletd -xf -
+            cd /build/coreletd
             dpkg-buildpackage -us -uc -b
-            cp ../umeshcore_*.deb ../umeshcore-dbgsym_*.d*b /out/ 2>/dev/null ||
-                cp ../umeshcore_*.deb /out/
+            cp ../coreletd_*.deb ../coreletd-dbgsym_*.d*b /out/ 2>/dev/null ||
+                cp ../coreletd_*.deb /out/
         "
 }
 
@@ -51,8 +51,8 @@ native_build() {
     mkdir -p "$repo/dist"
     ( cd "$repo" && dpkg-buildpackage -us -uc -b )
     # dpkg-buildpackage writes to the parent of the source tree.
-    mv "$repo"/../umeshcore_*.deb "$repo/dist/"
-    mv "$repo"/../umeshcore-dbgsym_*.d*b "$repo/dist/" 2>/dev/null || true
+    mv "$repo"/../coreletd_*.deb "$repo/dist/"
+    mv "$repo"/../coreletd-dbgsym_*.d*b "$repo/dist/" 2>/dev/null || true
 }
 
 case "${1-}" in

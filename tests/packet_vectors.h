@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string_view>
 
-namespace umc::pktvec {
+namespace clt::pktvec {
 
 inline constexpr std::string_view kAdvertPacket = "110003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8245b3a6902791ff01db6cc4b07a2101915cecd66941016fb8238da492290e9b39331f10edd85d46c7d4a8a7c6e5a3e2d3aea1909dbf7be572776fe2dd8390e82c9414f0591c8f01103c80cfeff75436f6e736f6c65";
 inline constexpr std::string_view kAdvertPayload = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8245b3a6902791ff01db6cc4b07a2101915cecd66941016fb8238da492290e9b39331f10edd85d46c7d4a8a7c6e5a3e2d3aea1909dbf7be572776fe2dd8390e82c9414f0591c8f01103c80cfeff75436f6e736f6c65";
@@ -26,4 +26,4 @@ inline constexpr std::string_view kTextBody = "hello mesh";
 inline constexpr int32_t kLatE6 = 51507400;
 inline constexpr int32_t kLonE6 = -127800;
 
-}  // namespace umc::pktvec
+}  // namespace clt::pktvec

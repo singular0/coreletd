@@ -11,7 +11,7 @@
 #include "util/log.h"
 #include "util/persist.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 const Bytes& Contact::shared_secret(const crypto::LocalIdentity& self) const {
     if (shared_.empty()) {
@@ -186,7 +186,7 @@ bool ContactStore::save() {
         return false;
     }
 
-    out << "# umeshcore contacts v1\n";
+    out << "# coreletd contacts v1\n";
     out << "# pubkey\ttype\tflags\tadv_ts\tlast_seen\tlat_e6\tlon_e6\tpath\tname\n";
     for (const auto& c : contacts_) {
         out << hex(c.pubkey) << '\t' << static_cast<int>(c.type) << '\t'
@@ -226,7 +226,7 @@ bool ContactStore::load() {
     bool saw_header = false;
     while (std::getline(in, line)) {
         lineno++;
-        if (line == "# umeshcore contacts v1") {
+        if (line == "# coreletd contacts v1") {
             saw_header = true;
             continue;
         }
@@ -297,4 +297,4 @@ bool ContactStore::load() {
     return true;
 }
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

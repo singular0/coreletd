@@ -8,7 +8,7 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 Node::Node(EventLoop& loop, Dispatcher& dispatcher, const crypto::LocalIdentity& self,
            ContactStore& contacts, ChannelStore& channels, Config cfg)
@@ -341,4 +341,4 @@ void Node::store_message(StoredMessage msg) {
     if (delegate_) delegate_->on_message_stored();
 }
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

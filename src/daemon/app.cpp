@@ -8,11 +8,11 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-#if UMESHCORE_HAVE_SX1262
+#if CORELETD_HAVE_SX1262
 #include "radio/sx1262.h"
 #endif
 
-namespace umc {
+namespace clt {
 
 App::App(Config cfg) : cfg_(std::move(cfg)) {}
 App::~App() = default;
@@ -61,7 +61,7 @@ std::unique_ptr<radio::Radio> App::make_radio(std::string& error) {
         return std::make_unique<radio::MockRadio>(cfg_.radio, std::move(opts));
     }
 
-#if UMESHCORE_HAVE_SX1262
+#if CORELETD_HAVE_SX1262
     radio::Sx1262::Pins pins;
     pins.spidev = cfg_.spi.spidev;
     pins.gpiochip = cfg_.spi.gpiochip;
@@ -120,8 +120,8 @@ bool App::start() {
 
     companion::DeviceMetrics::Info info;
     info.model = "uConsole AIO v2";
-    info.firmware_build = UMESHCORE_VERSION;
-    info.version = UMESHCORE_VERSION;
+    info.firmware_build = CORELETD_VERSION;
+    info.version = CORELETD_VERSION;
     info.max_contacts_div2 = mesh::ContactStore::kMaxContacts / 2;
     info.max_channels = mesh::ChannelStore::kMaxChannels;
     metrics_ = std::make_unique<HostMetrics>(std::move(info), cfg_.state_dir);
@@ -135,7 +135,7 @@ bool App::start() {
 }
 
 void App::log_status() {
-    LOG_INFO("umeshcore %s ready", UMESHCORE_VERSION);
+    LOG_INFO("coreletd %s ready", CORELETD_VERSION);
     LOG_INFO("  node      : %s \"%s\"", hex_prefix(identity_->pub()).c_str(),
              cfg_.node.name.c_str());
     LOG_INFO("  radio     : %s", radio_->describe().c_str());
@@ -160,4 +160,4 @@ void App::request_stop() {
     loop_.stop();
 }
 
-}  // namespace umc
+}  // namespace clt

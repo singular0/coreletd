@@ -4,7 +4,7 @@
 #include "util/hex.h"
 #include "util/log.h"
 
-namespace umc::proto {
+namespace clt::proto {
 
 const char* route_type_name(RouteType t) {
     switch (t) {
@@ -163,4 +163,4 @@ std::string Packet::describe() const {
     return s;
 }
 
-}  // namespace umc::proto
+}  // namespace clt::proto

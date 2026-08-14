@@ -4,7 +4,7 @@
 
 #include "util/bytes.h"
 
-namespace umc::crypto {
+namespace clt::crypto {
 
 inline constexpr size_t kPubKeySize = 32;
 // MeshCore stores the *expanded* Ed25519 key (a, RH) — the 64-byte SHA-512 of
@@ -41,4 +41,4 @@ void random_bytes(ByteSpan out);
 // Constant-time compare, for MACs and passwords.
 bool equal(ByteView a, ByteView b);
 
-}  // namespace umc::crypto
+}  // namespace clt::crypto

@@ -1,6 +1,6 @@
 #include "mesh/state_writer.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 StateWriter::StateWriter(EventLoop& loop, ContactStore& contacts, ChannelStore& channels,
                          uint32_t coalesce_ms)
@@ -30,4 +30,4 @@ bool StateWriter::flush() {
     return ok;
 }
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

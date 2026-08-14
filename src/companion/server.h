@@ -7,7 +7,7 @@
 #include "daemon/eventloop.h"
 #include "util/bytes.h"
 
-namespace umc::companion {
+namespace clt::companion {
 
 // Overflow-safe capacity check shared with the transport regression tests.
 bool outbound_buffer_has_capacity(size_t buffered, size_t next, size_t limit);
@@ -71,4 +71,4 @@ private:
     DisconnectHandler on_disconnect_;
 };
 
-}  // namespace umc::companion
+}  // namespace clt::companion

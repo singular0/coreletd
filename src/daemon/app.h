@@ -16,7 +16,7 @@
 #include "mesh/state_writer.h"
 #include "radio/radio.h"
 
-namespace umc {
+namespace clt {
 
 // Owns every subsystem and wires them together. Construction order matters:
 // identity, then radio, then dispatcher, then node, then the state writer, then
@@ -59,4 +59,4 @@ private:
     std::unique_ptr<companion::Session> session_;
 };
 
-}  // namespace umc
+}  // namespace clt

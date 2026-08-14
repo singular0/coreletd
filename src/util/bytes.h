@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-namespace umc {
+namespace clt {
 
 using Bytes = std::vector<uint8_t>;
 using ByteView = std::span<const uint8_t>;
@@ -137,4 +137,4 @@ inline ByteView subview(ByteView b, size_t off, size_t len) {
     return b.subspan(off, std::min(len, b.size() - off));
 }
 
-}  // namespace umc
+}  // namespace clt

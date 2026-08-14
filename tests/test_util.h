@@ -10,7 +10,7 @@
 #include "util/bytes.h"
 #include "util/hex.h"
 
-namespace umc::test {
+namespace clt::test {
 
 inline int g_failures = 0;
 inline int g_checks = 0;
@@ -46,15 +46,15 @@ inline int finish(const char* name) {
     return 1;
 }
 
-}  // namespace umc::test
+}  // namespace clt::test
 
-#define CHECK(expr) ::umc::test::report((expr), #expr, __FILE__, __LINE__)
+#define CHECK(expr) ::clt::test::report((expr), #expr, __FILE__, __LINE__)
 
 #define CHECK_EQ(a, b)                                                          \
     do {                                                                        \
         auto _a = (a);                                                          \
         auto _b = (b);                                                          \
-        ::umc::test::report(_a == _b, #a " == " #b, __FILE__, __LINE__,          \
+        ::clt::test::report(_a == _b, #a " == " #b, __FILE__, __LINE__,          \
                             "got " + std::to_string(_a) + ", want " + std::to_string(_b)); \
     } while (0)
 
@@ -64,8 +64,8 @@ inline int finish(const char* name) {
     do {                                                                        \
         auto&& _av = (a);                                                       \
         auto&& _bv = (b);                                                       \
-        ::umc::Bytes _a(_av.begin(), _av.end());                                \
-        ::umc::Bytes _b(_bv.begin(), _bv.end());                                \
-        ::umc::test::report(_a == _b, #a " == " #b, __FILE__, __LINE__,          \
-                            "got " + ::umc::hex(_a) + "\n     want " + ::umc::hex(_b)); \
+        ::clt::Bytes _a(_av.begin(), _av.end());                                \
+        ::clt::Bytes _b(_bv.begin(), _bv.end());                                \
+        ::clt::test::report(_a == _b, #a " == " #b, __FILE__, __LINE__,          \
+                            "got " + ::clt::hex(_a) + "\n     want " + ::clt::hex(_b)); \
     } while (0)

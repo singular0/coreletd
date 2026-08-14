@@ -3,7 +3,7 @@
 #include "mesh/contacts.h"
 #include "mesh/dispatcher.h"
 
-namespace umc::mesh {
+namespace clt::mesh {
 
 // Queues `p` for a contact: along its known return path when we have one, by
 // flooding otherwise. `force_flood` ignores a known path, which the last send
@@ -23,4 +23,4 @@ inline bool route_to(Dispatcher& dispatcher, proto::Packet& p, const Contact& to
     return dispatcher.send(std::move(p), priority, 0, std::move(on_result));
 }
 
-}  // namespace umc::mesh
+}  // namespace clt::mesh

@@ -9,7 +9,7 @@
 
 #include "util/log.h"
 
-namespace umc::radio {
+namespace clt::radio {
 
 SpiDev::~SpiDev() { close(); }
 
@@ -66,4 +66,4 @@ bool SpiDev::transfer(ByteView tx, ByteSpan rx) {
     return true;
 }
 
-}  // namespace umc::radio
+}  // namespace clt::radio

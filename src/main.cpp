@@ -17,7 +17,7 @@ void on_signal(int) { g_stop = 1; }
 
 void usage(const char* argv0) {
     printf(
-        "umeshcore %s — MeshCore daemon for uConsole + AIO v2\n"
+        "coreletd %s — MeshCore daemon for uConsole + AIO v2\n"
         "\n"
         "Usage: %s [options]\n"
         "\n"
@@ -26,13 +26,13 @@ void usage(const char* argv0) {
         "  -s, --syslog        omit timestamps, for running under systemd\n"
         "  -V, --version       print version and exit\n"
         "  -h, --help          this message\n",
-        UMESHCORE_VERSION, argv0, umc::kDefaultConfigPath);
+        CORELETD_VERSION, argv0, clt::kDefaultConfigPath);
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string config_path = umc::kDefaultConfigPath;
+    std::string config_path = clt::kDefaultConfigPath;
     int verbosity = 0;
     bool syslog_style = false;
 
@@ -51,15 +51,15 @@ int main(int argc, char** argv) {
             case 'c': config_path = optarg; break;
             case 'v': verbosity++; break;
             case 's': syslog_style = true; break;
-            case 'V': printf("%s\n", UMESHCORE_VERSION); return 0;
+            case 'V': printf("%s\n", CORELETD_VERSION); return 0;
             case 'h': usage(argv[0]); return 0;
             default: usage(argv[0]); return 2;
         }
     }
 
-    umc::log_set_syslog_style(syslog_style);
+    clt::log_set_syslog_style(syslog_style);
 
-    umc::Config cfg;
+    clt::Config cfg;
     std::string error;
     if (!cfg.load(config_path, error)) {
         // Log level is still at its default here, which is fine: this must be
@@ -71,11 +71,11 @@ int main(int argc, char** argv) {
 
     // An explicit -v beats the file, so a service can be debugged without
     // editing its config.
-    if (verbosity == 1) cfg.log_level = umc::LogLevel::Debug;
-    if (verbosity >= 2) cfg.log_level = umc::LogLevel::Trace;
-    umc::log_set_level(cfg.log_level);
+    if (verbosity == 1) cfg.log_level = clt::LogLevel::Debug;
+    if (verbosity >= 2) cfg.log_level = clt::LogLevel::Trace;
+    clt::log_set_level(cfg.log_level);
 
-    umc::App app(std::move(cfg));
+    clt::App app(std::move(cfg));
 
     struct sigaction sa {};
     sa.sa_handler = on_signal;

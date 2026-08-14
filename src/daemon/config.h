@@ -7,7 +7,7 @@
 #include "radio/radio.h"
 #include "util/log.h"
 
-namespace umc {
+namespace clt {
 
 struct SpiConfig {
     std::string spidev = "/dev/spidev1.0";
@@ -54,6 +54,6 @@ struct Config {
 };
 
 // Default config file location, overridable with --config.
-inline constexpr const char* kDefaultConfigPath = "/etc/umeshcore/umeshcored.ini";
+inline constexpr const char* kDefaultConfigPath = "/etc/coreletd/coreletd.ini";
 
-}  // namespace umc
+}  // namespace clt

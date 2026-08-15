@@ -6,8 +6,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <filesystem>
+#include <cstdint>
 #include <limits>
+#include <variant>
 
 #include "util/ini.h"
 
@@ -27,42 +28,15 @@ std::string default_state_dir() {
     return "./coreletd-state";
 }
 
-bool read_int(const Ini& ini, std::string_view key, int64_t def, int64_t min, int64_t max,
-              int64_t& value, std::string& error) {
-    bool ok = true;
-    value = ini.get_int64(key, def, ok);
-    if (!ok) {
-        error = std::string(key) + ": not an integer";
-        return false;
-    }
-    if (value < min || value > max) {
-        error = std::string(key) + " must be between " + std::to_string(min) + " and " +
-                std::to_string(max);
-        return false;
-    }
-    return true;
-}
+// --- constraints -----------------------------------------------------------
+// Integer settings need only a range, which the table states inline. These are
+// the ones that do not: each is named after the key it guards and pairs with
+// the requirement text quoted back in the error message.
 
-bool read_double(const Ini& ini, std::string_view key, double def, double& value,
-                 std::string& error) {
-    bool ok = true;
-    value = ini.get_double(key, def, ok);
-    if (!ok || !std::isfinite(value)) {
-        error = std::string(key) + ": not a finite number";
-        return false;
-    }
-    return true;
-}
-
-bool read_bool(const Ini& ini, std::string_view key, bool def, bool& value,
-               std::string& error) {
-    bool ok = true;
-    value = ini.get_bool(key, def, ok);
-    if (!ok) {
-        error = std::string(key) + ": not a boolean";
-        return false;
-    }
-    return true;
+bool valid_freq(double mhz) {
+    // 0 means "not set" here; whether that is allowed depends on the radio
+    // backend, so load() decides after the whole file is read.
+    return mhz == 0.0 || (mhz >= 150.0 && mhz <= 960.0);
 }
 
 bool supported_bandwidth(double khz) {
@@ -73,35 +47,222 @@ bool supported_bandwidth(double khz) {
                        [khz](double supported) { return std::fabs(khz - supported) < 0.005; });
 }
 
+bool valid_tcxo(double volts) { return volts == 0.0 || (volts >= 1.6 && volts <= 3.3); }
+
+bool valid_duty_cycle(double pct) { return pct > 0.0 && pct < 100.0; }
+
+bool valid_lat(double deg) { return deg >= -90.0 && deg <= 90.0; }
+
+bool valid_lon(double deg) { return deg >= -180.0 && deg <= 180.0; }
+
+// --- the settings table ----------------------------------------------------
+
+// Integer settings land in fields of five different widths. A row holds the
+// field's address plus two thunks — read the current value out as the default,
+// narrow the checked value back in — so the range check itself happens once, in
+// int64, and cannot be skipped for a narrower field.
+class IntField {
+public:
+    template <class T>
+    explicit IntField(T& field)
+        : field_(&field),
+          get_([](const void* p) { return static_cast<int64_t>(*static_cast<const T*>(p)); }),
+          set_([](void* p, int64_t v) { *static_cast<T*>(p) = static_cast<T>(v); }) {}
+
+    int64_t get() const { return get_(field_); }
+    void set(int64_t v) const { set_(field_, v); }
+
+private:
+    void* field_;
+    int64_t (*get_)(const void*);
+    void (*set_)(void*, int64_t);
+};
+
+struct StrTarget {
+    std::string* field;
+};
+
+struct BoolTarget {
+    bool* field;
+};
+
+struct IntTarget {
+    IntField field;
+    int64_t min;
+    int64_t max;
+};
+
+struct RealTarget {
+    double* field;
+    bool (*valid)(double);
+    // Completes "<key> must be ..." in the error message.
+    std::string_view requirement;
+};
+
+// One recognised key and where its value goes. The field's current value is the
+// default, so defaults stay in config.h beside the fields they belong to.
+struct Setting {
+    std::string_view key;
+    std::variant<StrTarget, BoolTarget, IntTarget, RealTarget> target;
+};
+
+Setting Str(std::string_view key, std::string& field) {
+    return {key, StrTarget {&field}};
+}
+
+Setting Bool(std::string_view key, bool& field) {
+    return {key, BoolTarget {&field}};
+}
+
+template <class T>
+Setting Int(std::string_view key, T& field, int64_t min, int64_t max) {
+    return {key, IntTarget {IntField(field), min, max}};
+}
+
+Setting Real(std::string_view key, double& field, bool (*valid)(double),
+             std::string_view requirement) {
+    return {key, RealTarget {&field, valid, requirement}};
+}
+
+// The two settings that no single field can hold: a log level arrives as a
+// name, and a position arrives as two degrees values that become one
+// fixed-point pair. load() converts both once the table has been read.
+struct Raw {
+    std::string log_level = "info";
+    double lat = 0.0;
+    double lon = 0.0;
+};
+
+// Every key the daemon understands, bound to the fields of `cfg`. Config::keys()
+// builds this against a throwaway Config, so a setting cannot exist without
+// being listed here for the unknown-key warning and for the shipped
+// coreletd.ini, which the tests check against this same list.
+std::vector<Setting> settings(Config& cfg, Raw& raw) {
+    constexpr int64_t kMaxInt = std::numeric_limits<int>::max();
+    constexpr int64_t kMaxU8 = std::numeric_limits<uint8_t>::max();
+    constexpr int64_t kMaxU16 = std::numeric_limits<uint16_t>::max();
+    // The advert timer is armed in milliseconds in a uint32_t, so a longer
+    // interval than this would wrap round to a near-immediate advert.
+    constexpr int64_t kMaxTimerDelaySeconds = std::numeric_limits<uint32_t>::max() / 1000;
+
+    return {
+        // --- logging and storage ---
+        Str("log_level", raw.log_level),
+        Str("state_dir", cfg.state_dir),
+        Str("identity_path", cfg.identity_path),
+        Str("contacts_path", cfg.contacts_path),
+        Str("channels_path", cfg.channels_path),
+
+        // --- radio ---
+        Bool("mock_radio", cfg.use_mock_radio),
+        Str("mock_replay_file", cfg.mock_replay_file),
+        Real("lora_freq", cfg.radio.freq_mhz, valid_freq,
+             "0 (unset) or between 150 and 960 MHz"),
+        Real("lora_bw", cfg.radio.bw_khz, supported_bandwidth,
+             "a bandwidth supported by SX1262 (7.81 to 500 kHz)"),
+        Int("lora_sf", cfg.radio.sf, 5, 12),
+        Int("lora_cr", cfg.radio.cr, 5, 8),
+        Int("lora_tx_power", cfg.radio.tx_power_dbm, -9, 22),
+        Int("lora_preamble", cfg.radio.preamble, 1, kMaxU16),
+        Int("lora_sync_word", cfg.radio.sync_word, 0, kMaxU8),
+        Real("lora_tcxo", cfg.radio.tcxo_voltage, valid_tcxo,
+             "0 (disabled) or between 1.6 and 3.3 volts"),
+        Bool("dio2_as_rf_switch", cfg.radio.dio2_as_rf_switch),
+        Bool("rx_boosted_gain", cfg.radio.rx_boosted_gain),
+        Int("current_limit", cfg.radio.current_limit_ma, 1, 157),
+        Real("duty_cycle", cfg.radio.duty_cycle_pct, valid_duty_cycle,
+             "greater than 0 and less than 100 percent"),
+
+        // --- SPI / GPIO ---
+        Str("spidev", cfg.spi.spidev),
+        Str("lora_gpiochip", cfg.spi.gpiochip),
+        Int("lora_irq_pin", cfg.spi.irq_pin, 0, kMaxInt),
+        Int("lora_busy_pin", cfg.spi.busy_pin, 0, kMaxInt),
+        Int("lora_reset_pin", cfg.spi.reset_pin, 0, kMaxInt),
+        // -1 on these three: driven by the SPI controller, or not wired at all.
+        Int("lora_nss_pin", cfg.spi.nss_pin, -1, kMaxInt),
+        Int("lora_rxen_pin", cfg.spi.rxen_pin, -1, kMaxInt),
+        Int("lora_txen_pin", cfg.spi.txen_pin, -1, kMaxInt),
+        Int("spi_speed", cfg.spi.spi_speed_hz, 1, 16000000),
+        Int("lora_retry_interval", cfg.spi.retry_interval_s, 0, 86400),
+
+        // --- node ---
+        Str("advert_name", cfg.node.name),
+        Int("advert_interval", cfg.node.advert_interval_s, 0, kMaxTimerDelaySeconds),
+        Bool("repeat", cfg.node.repeat),
+        Int("max_hops", cfg.node.max_hops, 0, proto::kMaxPathSize),
+        Real("lat", raw.lat, valid_lat, "between -90 and 90 degrees"),
+        Real("lon", raw.lon, valid_lon, "between -180 and 180 degrees"),
+
+        // --- companion ---
+        Str("companion_bind", cfg.companion.bind_addr),
+        Int("companion_port", cfg.companion.port, 1, kMaxU16),
+    };
+}
+
+// Applies one setting, leaving the field at its default when the key is absent.
+// Returns false with `error` set on a value that will not parse or that falls
+// outside the range the row states.
+bool apply(const Ini& ini, const Setting& s, std::string& error) {
+    const std::string key(s.key);
+    bool ok = true;
+
+    if (const auto* text = std::get_if<StrTarget>(&s.target)) {
+        *text->field = ini.get_str(s.key, *text->field);
+    } else if (const auto* flag = std::get_if<BoolTarget>(&s.target)) {
+        bool value = ini.get_bool(s.key, *flag->field, ok);
+        if (!ok) {
+            error = key + ": not a boolean";
+            return false;
+        }
+        *flag->field = value;
+    } else if (const auto* num = std::get_if<IntTarget>(&s.target)) {
+        int64_t value = ini.get_int64(s.key, num->field.get(), ok);
+        if (!ok) {
+            error = key + ": not an integer";
+            return false;
+        }
+        if (value < num->min || value > num->max) {
+            error = key + " must be between " + std::to_string(num->min) + " and " +
+                    std::to_string(num->max);
+            return false;
+        }
+        num->field.set(value);
+    } else {
+        const auto& real = std::get<RealTarget>(s.target);
+        double value = ini.get_double(s.key, *real.field, ok);
+        if (!ok || !std::isfinite(value)) {
+            error = key + ": not a finite number";
+            return false;
+        }
+        if (!real.valid(value)) {
+            error = key + " must be " + std::string(real.requirement);
+            return false;
+        }
+        *real.field = value;
+    }
+    return true;
+}
+
 }  // namespace
 
 bool Config::load(const std::string& path, std::string& error) {
     Ini ini;
     if (!ini.load(path, error)) return false;
 
-    // --- logging ---
-    std::string level = ini.get_str("log_level", "info");
-    if (!log_parse_level(level, log_level)) {
-        error = "log_level: unknown level \"" + level + "\"";
+    // The one default that is discovered rather than declared — it depends on
+    // whether we are root — so it cannot sit beside the field in config.h.
+    if (state_dir.empty()) state_dir = default_state_dir();
+
+    Raw raw;
+    for (const Setting& s : settings(*this, raw))
+        if (!apply(ini, s, error)) return false;
+
+    if (!log_parse_level(raw.log_level, log_level)) {
+        error = "log_level: unknown level \"" + raw.log_level + "\"";
         return false;
     }
 
-    // --- storage ---
-    state_dir = ini.get_str("state_dir", default_state_dir());
-
-    // --- radio ---
-    bool boolean = false;
-    if (!read_bool(ini, "mock_radio", use_mock_radio, boolean, error)) return false;
-    use_mock_radio = boolean;
-    mock_replay_file = ini.get_str("mock_replay_file");
-
-    double real = 0.0;
-    if (!read_double(ini, "lora_freq", radio.freq_mhz, real, error)) return false;
-    if (real != 0.0 && (real < 150.0 || real > 960.0)) {
-        error = "lora_freq must be between 150 and 960 MHz";
-        return false;
-    }
-    radio.freq_mhz = real;
     if (radio.freq_mhz <= 0 && !use_mock_radio) {
         error =
             "lora_freq is required — set the frequency for your region "
@@ -109,126 +270,27 @@ bool Config::load(const std::string& path, std::string& error) {
         return false;
     }
 
-    if (!read_double(ini, "lora_bw", radio.bw_khz, real, error)) return false;
-    if (!supported_bandwidth(real)) {
-        error = "lora_bw must be a bandwidth supported by SX1262 (7.81 to 500 kHz)";
-        return false;
-    }
-    radio.bw_khz = real;
-
-    int64_t integer = 0;
-    if (!read_int(ini, "lora_sf", radio.sf, 5, 12, integer, error)) return false;
-    radio.sf = static_cast<uint8_t>(integer);
-    if (!read_int(ini, "lora_cr", radio.cr, 5, 8, integer, error)) return false;
-    radio.cr = static_cast<uint8_t>(integer);
-    if (!read_int(ini, "lora_tx_power", radio.tx_power_dbm, -9, 22, integer, error))
-        return false;
-    radio.tx_power_dbm = static_cast<int>(integer);
-    if (!read_int(ini, "lora_preamble", radio.preamble, 1,
-                  std::numeric_limits<uint16_t>::max(), integer, error))
-        return false;
-    radio.preamble = static_cast<uint16_t>(integer);
-    if (!read_int(ini, "lora_sync_word", radio.sync_word, 0,
-                  std::numeric_limits<uint8_t>::max(), integer, error))
-        return false;
-    radio.sync_word = static_cast<uint8_t>(integer);
-
-    if (!read_double(ini, "lora_tcxo", radio.tcxo_voltage, real, error)) return false;
-    if (real != 0.0 && (real < 1.6 || real > 3.3)) {
-        error = "lora_tcxo must be 0 (disabled) or between 1.6 and 3.3 volts";
-        return false;
-    }
-    radio.tcxo_voltage = real;
-    if (!read_bool(ini, "dio2_as_rf_switch", radio.dio2_as_rf_switch, boolean, error))
-        return false;
-    radio.dio2_as_rf_switch = boolean;
-    if (!read_bool(ini, "rx_boosted_gain", radio.rx_boosted_gain, boolean, error))
-        return false;
-    radio.rx_boosted_gain = boolean;
-    if (!read_int(ini, "current_limit", radio.current_limit_ma, 1, 157, integer, error))
-        return false;
-    radio.current_limit_ma = static_cast<int>(integer);
-    if (!read_double(ini, "duty_cycle", radio.duty_cycle_pct, real, error)) return false;
-    if (real <= 0.0 || real >= 100.0) {
-        error = "duty_cycle must be greater than 0 and less than 100 percent";
-        return false;
-    }
-    radio.duty_cycle_pct = real;
-
-    // --- SPI / GPIO ---
-    spi.spidev = ini.get_str("spidev", spi.spidev);
-    spi.gpiochip = ini.get_str("lora_gpiochip", spi.gpiochip);
-    constexpr int64_t kMaxInt = std::numeric_limits<int>::max();
-    if (!read_int(ini, "lora_irq_pin", spi.irq_pin, 0, kMaxInt, integer, error)) return false;
-    spi.irq_pin = static_cast<int>(integer);
-    if (!read_int(ini, "lora_busy_pin", spi.busy_pin, 0, kMaxInt, integer, error)) return false;
-    spi.busy_pin = static_cast<int>(integer);
-    if (!read_int(ini, "lora_reset_pin", spi.reset_pin, 0, kMaxInt, integer, error)) return false;
-    spi.reset_pin = static_cast<int>(integer);
-    if (!read_int(ini, "lora_nss_pin", spi.nss_pin, -1, kMaxInt, integer, error)) return false;
-    spi.nss_pin = static_cast<int>(integer);
-    if (!read_int(ini, "lora_rxen_pin", spi.rxen_pin, -1, kMaxInt, integer, error)) return false;
-    spi.rxen_pin = static_cast<int>(integer);
-    if (!read_int(ini, "lora_txen_pin", spi.txen_pin, -1, kMaxInt, integer, error)) return false;
-    spi.txen_pin = static_cast<int>(integer);
-    if (!read_int(ini, "spi_speed", spi.spi_speed_hz, 1, 16000000, integer, error))
-        return false;
-    spi.spi_speed_hz = static_cast<uint32_t>(integer);
-    if (!read_int(ini, "lora_retry_interval", spi.retry_interval_s, 0, 86400, integer,
-                  error))
-        return false;
-    spi.retry_interval_s = static_cast<uint32_t>(integer);
-
-    // --- node ---
-    node.name = ini.get_str("advert_name", node.name);
-    constexpr int64_t kMaxTimerDelaySeconds = std::numeric_limits<uint32_t>::max() / 1000;
-    if (!read_int(ini, "advert_interval", node.advert_interval_s, 0, kMaxTimerDelaySeconds,
-                  integer, error))
-        return false;
-    node.advert_interval_s = static_cast<uint32_t>(integer);
-    if (!read_bool(ini, "repeat", node.repeat, boolean, error)) return false;
-    node.repeat = boolean;
-    if (!read_int(ini, "max_hops", node.max_hops, 0, proto::kMaxPathSize, integer, error))
-        return false;
-    node.max_hops = static_cast<uint8_t>(integer);
-
-    double lat = 0.0;
-    double lon = 0.0;
-    if (!read_double(ini, "lat", 0.0, lat, error)) return false;
-    if (!read_double(ini, "lon", 0.0, lon, error)) return false;
-    if (lat < -90.0 || lat > 90.0) {
-        error = "lat must be between -90 and 90 degrees";
-        return false;
-    }
-    if (lon < -180.0 || lon > 180.0) {
-        error = "lon must be between -180 and 180 degrees";
-        return false;
-    }
-    node.has_location = false;
+    // 0,0 is how the file says "no position", not a point in the Gulf of Guinea.
+    node.has_location = raw.lat != 0.0 || raw.lon != 0.0;
     node.lat_e6 = 0;
     node.lon_e6 = 0;
-    if (lat != 0.0 || lon != 0.0) {
-        node.has_location = true;
-        node.lat_e6 = static_cast<int32_t>(std::llround(lat * 1000000.0));
-        node.lon_e6 = static_cast<int32_t>(std::llround(lon * 1000000.0));
+    if (node.has_location) {
+        node.lat_e6 = static_cast<int32_t>(std::llround(raw.lat * 1000000.0));
+        node.lon_e6 = static_cast<int32_t>(std::llround(raw.lon * 1000000.0));
     }
-
-    // --- companion ---
-    companion.bind_addr = ini.get_str("companion_bind", companion.bind_addr);
-    if (!read_int(ini, "companion_port", companion.port, 1,
-                  std::numeric_limits<uint16_t>::max(), integer, error))
-        return false;
-    companion.port = static_cast<uint16_t>(integer);
-
-    // Explicit path overrides.
-    identity_path = ini.get_str("identity_path");
-    contacts_path = ini.get_str("contacts_path");
-    channels_path = ini.get_str("channels_path");
 
     for (const auto& key : ini.unread_keys())
         LOG_WARN("config: unknown key \"%s\" ignored", key.c_str());
 
     return true;
+}
+
+std::vector<std::string_view> Config::keys() {
+    Config cfg;
+    Raw raw;
+    std::vector<std::string_view> out;
+    for (const Setting& s : settings(cfg, raw)) out.push_back(s.key);
+    return out;
 }
 
 void Config::finalise() {

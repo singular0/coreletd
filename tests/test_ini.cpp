@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <vector>
 
 #include "daemon/config.h"
 #include "tests/test_util.h"
@@ -234,6 +236,58 @@ static void test_config_accepts_valid_boundaries() {
     CHECK_EQ(cfg.node.lon_e6, int32_t {180000000});
 }
 
+// Every `key = value` in the shipped file, commented-out samples included. A
+// commented line only counts when the '=' is spaced, which is how the file
+// writes every setting — that is what keeps unrelated snippets in the prose
+// (dtparam=spi=on) from being read as settings.
+static std::vector<std::string> shipped_ini_keys() {
+    std::ifstream in(std::string(CORELETD_SOURCE_DIR) + "/etc/coreletd.ini");
+    std::vector<std::string> keys;
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t i = line.find_first_not_of(" \t");
+        if (i == std::string::npos) continue;
+        bool commented = line[i] == '#' || line[i] == ';';
+        if (commented) i = line.find_first_not_of("#; \t", i);
+        if (i == std::string::npos) continue;
+
+        size_t start = i;
+        while (i < line.size() &&
+               (islower(static_cast<unsigned char>(line[i])) ||
+                isdigit(static_cast<unsigned char>(line[i])) || line[i] == '_'))
+            i++;
+        if (i == start) continue;
+
+        size_t sep = line.find_first_not_of(' ', i);
+        if (sep == std::string::npos || line[sep] != '=') continue;
+        if (commented && sep == i) continue;
+        keys.push_back(line.substr(start, i - start));
+    }
+    return keys;
+}
+
+static void test_shipped_ini_matches_the_settings_table() {
+    // etc/coreletd.ini is the only documentation of what the daemon reads, so
+    // it and Config's settings table have to name the same keys: one that is
+    // only in the table is undocumented, one that is only in the file is a
+    // setting the daemon would warn about as unknown and then ignore.
+    std::vector<std::string> documented = shipped_ini_keys();
+    CHECK(!documented.empty());
+    std::vector<std::string_view> known = Config::keys();
+
+    for (std::string_view k : known) {
+        std::string key(k);
+        bool found = std::find(documented.begin(), documented.end(), key) != documented.end();
+        if (!found) fprintf(stderr, "     undocumented in coreletd.ini: %s\n", key.c_str());
+        CHECK(found);
+    }
+    for (const std::string& key : documented) {
+        bool found = std::find(known.begin(), known.end(), std::string_view(key)) != known.end();
+        if (!found) fprintf(stderr, "     coreletd.ini documents unknown key: %s\n", key.c_str());
+        CHECK(found);
+    }
+}
+
 int main() {
     test_basic_parsing();
     test_quotes_and_inline_comments();
@@ -245,5 +299,6 @@ int main() {
     test_retry_interval();
     test_config_rejects_malformed_and_unsafe_values();
     test_config_accepts_valid_boundaries();
+    test_shipped_ini_matches_the_settings_table();
     return finish("ini");
 }

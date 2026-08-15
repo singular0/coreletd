@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "companion/server.h"
 #include "mesh/node.h"
@@ -48,6 +50,11 @@ struct Config {
     // Loads the file and applies it over the defaults above. Returns false with
     // `error` set on a malformed file or an out-of-range value.
     bool load(const std::string& path, std::string& error);
+
+    // Every key load() understands, in file order. Derived from the same table
+    // load() reads, so a setting cannot be added without turning up here; the
+    // tests use it to hold the shipped coreletd.ini to the same key set.
+    static std::vector<std::string_view> keys();
 
     // Fills in state paths from state_dir when they were not set explicitly.
     void finalise();

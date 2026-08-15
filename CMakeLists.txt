@@ -128,6 +128,10 @@ if(CORELETD_BUILD_TESTS)
         # Tests include their helpers as "tests/...", so the project root must
         # be on the include path as well as src/.
         target_include_directories(test_${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        # Some tests read shipped files (etc/coreletd.ini) rather than only
+        # headers, and are run from the build tree.
+        target_compile_definitions(test_${t} PRIVATE
+            CORELETD_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME ${t} COMMAND test_${t})
     endforeach()
 endif()

@@ -248,15 +248,21 @@ Bytes Session::cmd_get_contact_by_key(ByteView args) {
 }
 
 Bytes Session::cmd_add_update_contact(ByteView args) {
-    // pubkey(32) type(1) flags(1) path_len(1) path(path_len) name(32)
+    // pubkey(32) type(1) flags(1) path_len(1) path(64) name(32)
     // last_advert(4) [lat(4) lon(4)]
+    //
+    // The path field is a fixed 64 bytes with only the first path_len
+    // meaningful, exactly as contact_frame() writes it. Consuming path_len
+    // bytes instead would leave every later field short by the padding.
     Reader r(args);
     ByteView pubkey = r.take(crypto::kPubKeySize);
     uint8_t type = r.u8();
     uint8_t flags = r.u8();
     uint8_t path_len = r.u8();
-    ByteView path = path_len == kNoPath ? ByteView {} : r.take(path_len);
+    ByteView path_field = r.take(kContactPathField);
     if (!r.ok()) return resp_err(kErrIllegalArg);
+    if (path_len != kNoPath && path_len > kContactPathField) return resp_err(kErrIllegalArg);
+    ByteView path = path_len == kNoPath ? ByteView {} : path_field.first(path_len);
 
     mesh::Contact* c = contacts_.upsert(pubkey);
     if (!c) return resp_err(kErrTableFull);

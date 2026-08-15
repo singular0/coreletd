@@ -2,8 +2,6 @@
 
 #include <cmath>
 
-#include "util/clock.h"
-
 namespace clt::radio {
 
 uint32_t Radio::airtime_ms(size_t bytes) const {
@@ -27,7 +25,7 @@ uint32_t Radio::airtime_ms(size_t bytes) const {
 }
 
 void DutyCycle::prune() const {
-    uint32_t now = millis();
+    uint32_t now = clock_.now_ms();
     std::erase_if(entries_, [now](const Entry& e) {
         return static_cast<int32_t>(now - e.at_ms) > static_cast<int32_t>(kWindowMs);
     });
@@ -35,7 +33,7 @@ void DutyCycle::prune() const {
 
 void DutyCycle::record(uint32_t airtime_ms) {
     prune();
-    entries_.push_back(Entry {millis(), airtime_ms});
+    entries_.push_back(Entry {clock_.now_ms(), airtime_ms});
 }
 
 double DutyCycle::used_pct() const {
@@ -65,7 +63,7 @@ uint32_t DutyCycle::wait_ms(uint32_t candidate_airtime_ms) const {
     // need to expire before a larger one fits.
     const double excess = static_cast<double>(total + candidate_airtime_ms) - budget;
     uint64_t released = 0;
-    const uint32_t now = millis();
+    const uint32_t now = clock_.now_ms();
     for (const auto& e : entries_) {
         released += e.airtime_ms;
         if (static_cast<double>(released) < excess) continue;

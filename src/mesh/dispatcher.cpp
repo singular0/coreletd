@@ -4,7 +4,6 @@
 #include <iterator>
 
 #include "crypto/crypto.h"
-#include "util/clock.h"
 #include "util/hex.h"
 #include "util/log.h"
 
@@ -38,7 +37,7 @@ uint32_t pack_hash(ByteView h) {
 Dispatcher::Dispatcher(EventLoop& loop, radio::Radio& radio, size_t queue_limit)
     : loop_(loop),
       radio_(radio),
-      duty_(radio.params().duty_cycle_pct),
+      duty_(loop.clock(), radio.params().duty_cycle_pct),
       queue_limit_(std::max<size_t>(queue_limit, 1)) {}
 
 bool Dispatcher::start(std::string& error) {
@@ -90,7 +89,7 @@ void Dispatcher::on_radio_rx(radio::RxPacket&& rx) {
 
 bool Dispatcher::check_and_mark_seen(const proto::Packet& p) {
     uint32_t key = pack_hash(p.dedup_hash());
-    uint32_t now = millis();
+    uint32_t now = loop_.now_ms();
 
     auto it = seen_.find(key);
     if (it != seen_.end() && static_cast<int32_t>(it->second - now) > 0) {
@@ -102,7 +101,7 @@ bool Dispatcher::check_and_mark_seen(const proto::Packet& p) {
 }
 
 void Dispatcher::expire_seen() {
-    uint32_t now = millis();
+    uint32_t now = loop_.now_ms();
     std::erase_if(seen_, [now](const auto& kv) {
         return static_cast<int32_t>(kv.second - now) <= 0;
     });
@@ -116,7 +115,7 @@ bool Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms,
         return false;
     }
 
-    uint32_t now = millis();
+    uint32_t now = loop_.now_ms();
 
     // Anything we originate must not come back to us as "new" if a neighbour
     // repeats it.
@@ -158,7 +157,7 @@ bool Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms,
 }
 
 void Dispatcher::schedule_pump(uint32_t delay_ms) {
-    uint32_t due = millis() + delay_ms;
+    uint32_t due = loop_.now_ms() + delay_ms;
     // Keep an existing timer only when it will wake us no later. A duty-cycle
     // recheck may be tens of seconds away, while a newly queued ACK or a
     // completed transmission needs another pump almost immediately.
@@ -177,7 +176,7 @@ void Dispatcher::pump() {
     if (queue_.empty()) return;
     if (radio_.tx_busy()) return;  // on_radio_tx_done will pump again
 
-    uint32_t now = millis();
+    uint32_t now = loop_.now_ms();
 
     // Drop anything that expired while waiting.
     while (!queue_.empty() && static_cast<int32_t>(queue_.front().expiry_ms - now) <= 0) {

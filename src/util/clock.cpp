@@ -19,6 +19,17 @@ uint32_t millis() {
         duration_cast<milliseconds>(steady_clock::now() - g_start).count());
 }
 
+namespace {
+struct MillisClock final : Clock {
+    uint32_t now_ms() const override { return millis(); }
+};
+}  // namespace
+
+Clock& millis_clock() {
+    static MillisClock instance;
+    return instance;
+}
+
 uint32_t unix_now() {
     using namespace std::chrono;
     int64_t t = duration_cast<seconds>(system_clock::now().time_since_epoch()).count() + g_offset;

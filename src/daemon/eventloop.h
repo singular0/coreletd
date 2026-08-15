@@ -5,7 +5,10 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <utility>
+
+#include "util/clock.h"
 
 namespace clt {
 
@@ -17,6 +20,12 @@ namespace clt {
 // anywhere else in the codebase, and callbacks must not block.
 class EventLoop {
 public:
+    // The loop owns the clock. Everything scheduled already goes through it,
+    // so everything that measures elapsed time reads the time from it too
+    // rather than from the global millis(). Hand it a ManualClock and the
+    // subsystems built on top run on virtual time without knowing it.
+    explicit EventLoop(Clock& clock = millis_clock()) : clock_(clock) {}
+
     using FdCallback = std::function<void(short revents)>;
     using TimerCallback = std::function<void()>;
 
@@ -92,6 +101,24 @@ public:
     [[nodiscard]] Timer add_timer(uint32_t delay_ms, TimerCallback cb);
     [[nodiscard]] Timer add_repeating(uint32_t interval_ms, TimerCallback cb);
 
+    // Monotonic milliseconds, from whichever clock this loop was given. The
+    // subsystems the loop drives use this rather than millis() directly, so a
+    // test can move them all together.
+    uint32_t now_ms() const { return clock_.now_ms(); }
+
+    // For handing on to something that reads the clock but schedules nothing,
+    // such as DutyCycle.
+    Clock& clock() const { return clock_; }
+
+    // Lets `ms` of virtual time pass, dispatching timers in due order as it
+    // goes, and returns without ever entering poll() or sleeping. This is what
+    // makes the retry ladder and the duty-cycle window testable: advance(8000)
+    // rather than a real eight seconds.
+    //
+    // Stops early if a callback calls stop(). Does nothing on a real clock,
+    // where time is not ours to move.
+    void advance(uint32_t ms);
+
     // Polled at the top of every iteration and after poll() is interrupted.
     // Returning true stops the loop. This is how a signal handler gets us out
     // of poll(): delivering the signal makes poll() fail with EINTR, and the
@@ -125,10 +152,14 @@ private:
     void remove_fd(WatchId id);
     void cancel_timer(TimerId id);
 
+    // Milliseconds until the soonest live timer, negative when one is already
+    // overdue, nullopt when none is armed.
+    std::optional<int64_t> next_due_ms() const;
     int next_timeout_ms() const;
     void run_due_timers();
     void reap();
 
+    Clock& clock_;
     std::function<bool()> interrupt_check_;
     std::map<WatchId, WatchEntry> watches_;
     std::map<TimerId, TimerEntry> timers_;

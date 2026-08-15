@@ -5,6 +5,7 @@
 
 #include "daemon/eventloop.h"
 #include "util/bytes.h"
+#include "util/clock.h"
 
 namespace clt::radio {
 
@@ -80,7 +81,9 @@ private:
 // before the next transmission stays inside the configured duty cycle.
 class DutyCycle {
 public:
-    explicit DutyCycle(double percent) : percent_(percent) {}
+    // The window is an hour wide, so the clock has to come from outside for any
+    // of this to be observable in a test.
+    DutyCycle(const Clock& clock, double percent) : clock_(clock), percent_(percent) {}
 
     void record(uint32_t airtime_ms);
     // Milliseconds to wait before transmitting a packet with the given airtime;
@@ -97,6 +100,7 @@ private:
 
     void prune() const;
 
+    const Clock& clock_;
     double percent_;
     mutable std::vector<Entry> entries_;
 };

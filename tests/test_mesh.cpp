@@ -361,20 +361,41 @@ static void test_failed_store_saves_remain_dirty() {
 }
 
 static void test_duty_cycle_includes_candidate_airtime() {
-    radio::DutyCycle duty(1.0);  // 36,000 ms per rolling hour
+    ManualClock clock;
+    radio::DutyCycle duty(clock, 1.0);  // 36,000 ms per rolling hour
     duty.record(35900);
 
     CHECK_EQ(duty.wait_ms(100), uint32_t {0});
     CHECK(duty.wait_ms(101) > 0);
 
-    radio::DutyCycle several(1.0);
+    radio::DutyCycle several(clock, 1.0);
     several.record(10000);
     several.record(10000);
     several.record(10000);
     CHECK(several.wait_ms(7000) > 0);
 
-    radio::DutyCycle impossible(0.001);  // 36 ms per hour
+    radio::DutyCycle impossible(clock, 0.001);  // 36 ms per hour
     CHECK(impossible.wait_ms(37) > 0);
+}
+
+static void test_duty_cycle_budget_returns_with_the_window() {
+    // The window is an hour wide. Only a clock we drive makes the far edge of
+    // it reachable at all.
+    ManualClock clock;
+    radio::DutyCycle duty(clock, 1.0);  // 36,000 ms per rolling hour
+
+    duty.record(36000);  // the entire budget, spent at t=0
+    CHECK(duty.wait_ms(1000) > 0);
+    CHECK_EQ(duty.used_pct(), 1.0);
+
+    // Still spent a second before that transmission ages out, and the wait it
+    // reports is exactly the time left on it.
+    clock.advance(3599000);
+    CHECK_EQ(duty.wait_ms(1000), uint32_t {1000});
+
+    clock.advance(2000);
+    CHECK_EQ(duty.wait_ms(1000), uint32_t {0});
+    CHECK_EQ(duty.used_pct(), 0.0);
 }
 
 static void test_dispatch_result_waits_for_actual_transmission() {
@@ -435,7 +456,8 @@ static void test_identical_pending_messages_are_coalesced() {
 }
 
 static void test_earlier_pump_replaces_later_timer() {
-    EventLoop loop;
+    ManualClock clock;
+    EventLoop loop(clock);
     GatedRadio radio;
     Dispatcher dispatcher(loop, radio);
     std::string error;
@@ -457,8 +479,10 @@ static void test_earlier_pump_replaces_later_timer() {
     CHECK_EQ(radio.send_count(), size_t {1});
     radio.complete_tx();
 
-    auto deadline = loop.add_timer(600, [&loop] { loop.stop(); });
-    loop.run();
+    // The jitter is at most 400 ms, so on virtual time this is exact: if the
+    // stale one-second recheck were still what woke us, nothing would have
+    // gone out yet.
+    loop.advance(401);
     CHECK_EQ(radio.send_count(), size_t {2});
 }
 
@@ -558,7 +582,8 @@ static void test_retry_routes_like_the_first_send() {
     contacts.set_path(peer, path);
 
     ChannelStore channels;
-    EventLoop loop;
+    ManualClock clock;
+    EventLoop loop(clock);
     GatedRadio radio;
     Dispatcher dispatcher(loop, radio, 1);
     std::string error;
@@ -586,8 +611,9 @@ static void test_retry_routes_like_the_first_send() {
     CHECK_EQ(dispatcher.stats().tx_dropped, uint32_t {1});
     radio.complete_tx();
 
-    auto deadline = loop.add_timer(5, [&loop] { loop.stop(); });
-    loop.run();
+    // A send that never made it onto the air advances on the next loop pass
+    // rather than waiting out the ladder.
+    loop.advance(5);
 
     CHECK_EQ(radio.send_count(), size_t {3});
     auto sent = proto::Packet::decode(radio.last_sent());
@@ -609,6 +635,88 @@ static void test_retry_routes_like_the_first_send() {
     if (!msg) return;
     CHECK_EQ(msg->attempt, uint8_t {1});
     CHECK(msg->body() == "retry me");
+}
+
+static void test_retry_ladder_runs_out_of_attempts() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+
+    ContactStore contacts(*self);
+    Contact& peer = *contacts.upsert(from_hex(pv::kPubB));
+    contacts.set_path(peer, Bytes {0xAA, 0xBB});
+
+    ManualClock clock;
+    EventLoop loop(clock);
+    GatedRadio radio;
+    radio.set_ready(true);
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    ReliableSender sender(loop, dispatcher, *self, contacts);
+    CHECK(sender.send(peer, "are you there?", proto::kTxtPlain, pv::kFixedTime).has_value());
+    CHECK_EQ(radio.send_count(), size_t {1});
+    radio.complete_tx();
+
+    auto first = proto::Packet::decode(radio.last_sent());
+    CHECK(first.has_value());
+    if (first) CHECK(first->is_direct());
+
+    // 8 s, then 16 s, then 32 s — and nothing goes out a millisecond early.
+    size_t attempts = 1;
+    for (uint32_t delay : {8000u, 16000u, 32000u}) {
+        loop.advance(delay - 1);
+        CHECK_EQ(radio.send_count(), attempts);
+        loop.advance(1);
+        CHECK_EQ(radio.send_count(), ++attempts);
+        radio.complete_tx();
+    }
+    CHECK_EQ(radio.send_count(), size_t {4});
+
+    // The last attempt escalates to flood: a stale direct path is the usual
+    // reason an ack never arrived.
+    auto last = proto::Packet::decode(radio.last_sent());
+    CHECK(last.has_value());
+    if (last) CHECK(last->is_flood());
+
+    // Four is all the attempt counter can express on the wire, so the send is
+    // abandoned rather than retried a fifth time.
+    CHECK_EQ(sender.pending(), size_t {1});
+    loop.advance(32000);
+    CHECK_EQ(radio.send_count(), size_t {4});
+    CHECK_EQ(sender.pending(), size_t {0});
+}
+
+static void test_queued_packet_expiry_reports_failure() {
+    ManualClock clock;
+    EventLoop loop(clock);
+    GatedRadio radio;  // never becomes ready
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    proto::Packet advert;
+    advert.type = proto::PayloadType::Advert;
+    advert.payload = {1, 2, 3, 4};
+
+    bool reported = false;
+    bool transmitted = true;
+    CHECK(dispatcher.send(advert, kPriorityAdvert, 0, [&](bool sent) {
+        reported = true;
+        transmitted = sent;
+    }));
+
+    // Queued packets expire after ten seconds per priority level, so a minute
+    // for an advert. The radio never comes up; the recheck keeps looking.
+    loop.advance(59000);
+    CHECK(!reported);
+    CHECK_EQ(dispatcher.queue_depth(), size_t {1});
+
+    loop.advance(2000);
+    CHECK(reported);
+    CHECK(!transmitted);
+    CHECK_EQ(dispatcher.queue_depth(), size_t {0});
+    CHECK_EQ(dispatcher.stats().tx_dropped, uint32_t {1});
 }
 
 static void test_contact_references_survive_insertion() {
@@ -732,22 +840,28 @@ static void test_state_writer_batches_deferred_saves() {
     const std::string contacts_path = "/tmp/coreletd_test_writer_contacts";
     const std::string channels_path = "/tmp/coreletd_test_writer_channels";
 
-    EventLoop loop;
+    ManualClock clock;
+    EventLoop loop(clock);
     ContactStore contacts(*self, contacts_path);
     ChannelStore channels(channels_path);
-    StateWriter writer(loop, contacts, channels, 5);
+    // The production coalescing window, which only virtual time makes cheap to
+    // wait out.
+    StateWriter writer(loop, contacts, channels);
 
     contacts.upsert(from_hex(pv::kPubB));
     writer.request_save();
     channels.set(1, Channel::from_hashtag("#writer"));
     writer.request_save();
 
-    // Neither request wrote anything on its own.
+    // Neither request wrote anything on its own, nor a millisecond before the
+    // window closes.
+    CHECK(contacts.dirty());
+    CHECK(channels.dirty());
+    loop.advance(StateWriter::kCoalesceMs - 1);
     CHECK(contacts.dirty());
     CHECK(channels.dirty());
 
-    auto deadline = loop.add_timer(30, [&loop] { loop.stop(); });
-    loop.run();
+    loop.advance(1);
 
     // One pass covers every store that had changed, including the one whose
     // change arrived after the write was already scheduled.
@@ -815,6 +929,7 @@ int main() {
     test_oversized_encrypted_messages_are_rejected();
     test_failed_store_saves_remain_dirty();
     test_duty_cycle_includes_candidate_airtime();
+    test_duty_cycle_budget_returns_with_the_window();
     test_dispatch_result_waits_for_actual_transmission();
     test_identical_pending_messages_are_coalesced();
     test_earlier_pump_replaces_later_timer();
@@ -822,6 +937,8 @@ int main() {
     test_pending_send_limit_rejects_new_message();
     test_unusable_contact_key_is_reported_as_such();
     test_retry_routes_like_the_first_send();
+    test_retry_ladder_runs_out_of_attempts();
+    test_queued_packet_expiry_reports_failure();
     test_contact_references_survive_insertion();
     test_received_message_marks_store_dirty();
     test_direct_ack_marks_store_dirty();

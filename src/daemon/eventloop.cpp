@@ -4,10 +4,8 @@
 
 #include <algorithm>
 #include <cstring>
-#include <limits>
 #include <vector>
 
-#include "util/clock.h"
 #include "util/log.h"
 
 namespace clt {
@@ -34,14 +32,14 @@ void EventLoop::remove_fd(WatchId id) {
 
 EventLoop::Timer EventLoop::add_timer(uint32_t delay_ms, TimerCallback cb) {
     TimerId id = next_timer_++;
-    timers_[id] = TimerEntry {millis() + delay_ms, 0, std::move(cb), false};
+    timers_[id] = TimerEntry {clock_.now_ms() + delay_ms, 0, std::move(cb), false};
     return Timer(*this, id);
 }
 
 EventLoop::Timer EventLoop::add_repeating(uint32_t interval_ms, TimerCallback cb) {
     if (interval_ms == 0) interval_ms = 1;
     TimerId id = next_timer_++;
-    timers_[id] = TimerEntry {millis() + interval_ms, interval_ms, std::move(cb), false};
+    timers_[id] = TimerEntry {clock_.now_ms() + interval_ms, interval_ms, std::move(cb), false};
     return Timer(*this, id);
 }
 
@@ -52,22 +50,27 @@ void EventLoop::cancel_timer(TimerId id) {
     dirty_ = true;
 }
 
-int EventLoop::next_timeout_ms() const {
-    uint32_t now = millis();
-    int64_t soonest = std::numeric_limits<int64_t>::max();
+std::optional<int64_t> EventLoop::next_due_ms() const {
+    uint32_t now = clock_.now_ms();
+    std::optional<int64_t> soonest;
     for (const auto& [id, t] : timers_) {
         if (t.dead) continue;
         // Unsigned subtraction handles the 49-day millis() wrap correctly.
         int64_t remaining = static_cast<int32_t>(t.due_ms - now);
-        soonest = std::min(soonest, remaining);
+        if (!soonest || remaining < *soonest) soonest = remaining;
     }
-    if (soonest == std::numeric_limits<int64_t>::max()) return -1;  // block
-    if (soonest < 0) return 0;
-    return static_cast<int>(std::min<int64_t>(soonest, 60000));
+    return soonest;
+}
+
+int EventLoop::next_timeout_ms() const {
+    auto soonest = next_due_ms();
+    if (!soonest) return -1;  // block
+    if (*soonest < 0) return 0;
+    return static_cast<int>(std::min<int64_t>(*soonest, 60000));
 }
 
 void EventLoop::run_due_timers() {
-    uint32_t now = millis();
+    uint32_t now = clock_.now_ms();
 
     // Snapshot ids: a callback may add or cancel timers.
     std::vector<TimerId> due;
@@ -127,7 +130,16 @@ void EventLoop::run() {
             break;
         }
 
-        int n = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeout);
+        // A virtual clock is never waited on: poll() reports only what is ready
+        // this instant, and if that is nothing the clock moves to whatever is
+        // due next. Real fds still work — reaching the next timer just costs no
+        // wall time. With no timer armed there is nothing to move the clock to,
+        // so an fd is the only thing that can happen and poll() blocks for it
+        // exactly as it always would.
+        const bool virtual_time = clock_.is_virtual();
+        const int wait_ms = virtual_time && timeout >= 0 ? 0 : timeout;
+
+        int n = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), wait_ms);
         if (n < 0) {
             // A signal arrived. Give the interrupt check a chance to stop us
             // before going back to sleep, or SIGTERM would never be noticed.
@@ -150,8 +162,41 @@ void EventLoop::run() {
             if (stop_) break;
         }
 
+        if (!stop_ && virtual_time && n == 0) {
+            if (auto due = next_due_ms(); due && *due > 0)
+                clock_.set_now_ms(clock_.now_ms() + static_cast<uint32_t>(*due));
+        }
+
         if (!stop_) run_due_timers();
     }
+}
+
+void EventLoop::advance(uint32_t ms) {
+    if (!clock_.is_virtual()) {
+        LOG_WARN("advance() needs a virtual clock; real time moves on its own");
+        return;
+    }
+
+    const uint32_t target = clock_.now_ms() + ms;
+    stop_ = false;
+    while (!stop_) {
+        reap();
+
+        // Wrap-safe throughout: `target` may well have wrapped past zero while
+        // `now` has not.
+        const int32_t remaining = static_cast<int32_t>(target - clock_.now_ms());
+        if (remaining <= 0) break;
+
+        auto due = next_due_ms();
+        if (!due || *due > remaining) break;  // nothing else lands before target
+
+        // Negative means already overdue: run it where we stand.
+        if (*due > 0) clock_.set_now_ms(clock_.now_ms() + static_cast<uint32_t>(*due));
+        run_due_timers();
+    }
+
+    // Land exactly on the requested instant, so repeated advances add up.
+    if (!stop_ && static_cast<int32_t>(target - clock_.now_ms()) > 0) clock_.set_now_ms(target);
 }
 
 void EventLoop::stop() { stop_ = true; }

@@ -2,6 +2,7 @@
 #include <unistd.h>
 
 #include <memory>
+#include <vector>
 
 #include "daemon/eventloop.h"
 #include "tests/test_util.h"
@@ -129,11 +130,74 @@ static void test_fd_watch_deregisters() {
     ::close(fds[1]);
 }
 
+static void test_advance_dispatches_in_due_order() {
+    ManualClock clock;
+    EventLoop loop(clock);
+
+    std::vector<int> order;
+    auto late = loop.add_timer(32000, [&] { order.push_back(2); });
+    auto early = loop.add_timer(8000, [&] { order.push_back(1); });
+
+    loop.advance(7999);
+    CHECK_EQ(order.size(), size_t {0});
+
+    loop.advance(1);
+    CHECK_EQ(order.size(), size_t {1});
+    CHECK_EQ(loop.now_ms(), uint32_t {8000});
+
+    // Advances add up: landing exactly on the requested instant is what lets a
+    // test step through a retry ladder one delay at a time.
+    loop.advance(24000);
+    CHECK_EQ(order.size(), size_t {2});
+    CHECK_EQ(order[0], 1);
+    CHECK_EQ(order[1], 2);
+    CHECK_EQ(loop.now_ms(), uint32_t {32000});
+}
+
+static void test_run_does_not_wait_out_virtual_time() {
+    // An hour of retries and duty-cycle window, in whatever it costs to
+    // dispatch two timers.
+    ManualClock clock;
+    EventLoop loop(clock);
+
+    int fired = 0;
+    auto slow = loop.add_timer(3600000, [&] { fired++; });
+    auto deadline = loop.add_timer(3600001, [&loop] { loop.stop(); });
+
+    loop.run();
+
+    CHECK_EQ(fired, 1);
+    CHECK_EQ(loop.now_ms(), uint32_t {3600001});
+}
+
+static void test_timers_survive_the_millis_wrap() {
+    // millis() wraps every 49 days, and the loop's due-time arithmetic is
+    // written for it. Start just short of the wrap and step across.
+    ManualClock clock(0xFFFFFF00);
+    EventLoop loop(clock);
+
+    int before_wrap = 0;
+    int after_wrap = 0;
+    auto before = loop.add_timer(0x80, [&] { before_wrap++; });
+    auto after = loop.add_timer(0x180, [&] { after_wrap++; });
+
+    loop.advance(0x100);
+    CHECK_EQ(before_wrap, 1);
+    CHECK_EQ(after_wrap, 0);
+    CHECK_EQ(loop.now_ms(), uint32_t {0});  // wrapped
+
+    loop.advance(0x100);
+    CHECK_EQ(after_wrap, 1);
+}
+
 int main() {
     test_dropped_handle_never_fires();
     test_registration_dies_with_its_owner();
     test_assigning_over_a_handle_cancels_the_old_one();
     test_repeating_timer_can_cancel_itself();
     test_fd_watch_deregisters();
+    test_advance_dispatches_in_due_order();
+    test_run_does_not_wait_out_virtual_time();
+    test_timers_survive_the_millis_wrap();
     return finish("eventloop");
 }

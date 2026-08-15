@@ -63,7 +63,11 @@ void MockRadio::replay_next() {
 
 void MockRadio::inject(Bytes data, int rssi, float snr) {
     LOG_DEBUG("mock radio rx %zu bytes: %s", data.size(), hex(data).c_str());
-    deliver_rx(RxPacket {std::move(data), rssi, snr, millis()});
+    // Stamp from the loop's clock so an injected packet lands on the same
+    // timeline as everything it will be compared against. Before begin(), the
+    // only clock there is is the real one.
+    const uint32_t rx_ms = loop_ ? loop_->now_ms() : millis();
+    deliver_rx(RxPacket {std::move(data), rssi, snr, rx_ms});
 }
 
 bool MockRadio::send(ByteView data) {

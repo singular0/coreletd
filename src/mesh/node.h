@@ -50,7 +50,8 @@ public:
     void start();
     void set_delegate(Delegate* d) { delegate_ = d; }
 
-    Config& config() { return cfg_; }
+    // Read-only: the config is loaded once at startup, and the companion
+    // protocol refuses the commands that would edit it at runtime.
     const Config& config() const { return cfg_; }
     const crypto::LocalIdentity& self() const { return self_; }
 

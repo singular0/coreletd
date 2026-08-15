@@ -457,25 +457,17 @@ Bytes Session::cmd_set_channel(ByteView args) {
     return saved_reply();
 }
 
+// The advert name and location come from the config file. Accepting them here
+// would change only the in-memory copy, so the edit would revert on the next
+// restart with nothing to tell the app it had been lost.
 Bytes Session::cmd_set_advert_name(ByteView args) {
-    if (args.empty()) return resp_err(kErrIllegalArg);
-    node_.config().name = to_string(args);
-    LOG_INFO("companion: advert name set to \"%s\"", node_.config().name.c_str());
-    return resp_ok();
+    LOG_INFO("companion: advert name change refused (set advert_name in the config file)");
+    return Bytes {kRespDisabled};
 }
 
 Bytes Session::cmd_set_advert_latlon(ByteView args) {
-    Reader r(args);
-    int32_t lat_e6 = r.i32();
-    int32_t lon_e6 = r.i32();
-    if (!r.ok()) return resp_err(kErrIllegalArg);
-
-    auto& cfg = node_.config();
-    cfg.lat_e6 = lat_e6;
-    cfg.lon_e6 = lon_e6;
-    cfg.has_location = cfg.lat_e6 != 0 || cfg.lon_e6 != 0;
-    LOG_INFO("companion: advert location set to %.6f, %.6f", cfg.lat_e6 / 1e6, cfg.lon_e6 / 1e6);
-    return resp_ok();
+    LOG_INFO("companion: advert location change refused (set lat and lon in the config file)");
+    return Bytes {kRespDisabled};
 }
 
 Bytes Session::cmd_get_battery(ByteView args) {

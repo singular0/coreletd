@@ -1,6 +1,5 @@
 #pragma once
 
-#include <functional>
 #include <memory>
 #include <string>
 
@@ -15,6 +14,7 @@
 #include "mesh/node.h"
 #include "mesh/state_writer.h"
 #include "radio/radio.h"
+#include "util/clock.h"
 
 namespace clt {
 
@@ -23,17 +23,23 @@ namespace clt {
 // the companion server.
 class App {
 public:
-    explicit App(Config cfg);
+    // The radio and the clock are the two things the daemon builds for itself
+    // and a test replaces. A null radio means the config picks the backend,
+    // which is what the daemon wants; handing one in stands the whole stack up
+    // against a radio the test drives. The clock reaches every subsystem
+    // through the loop, so a ManualClock runs all of it on virtual time.
+    explicit App(Config cfg, std::unique_ptr<radio::Radio> radio = nullptr,
+                 Clock& clock = millis_clock());
     ~App();
 
     // Returns false with the reason logged if anything fails to come up.
     bool start();
     void run();
     void request_stop();
-    // Forwarded to the event loop so a signal handler can break out of poll().
-    void set_interrupt_check(std::function<bool()> fn) {
-        loop_.set_interrupt_check(std::move(fn));
-    }
+
+    // The loop everything is scheduled on: main() hangs its signal check here,
+    // and a harness steps virtual time through it.
+    EventLoop& loop() { return loop_; }
 
 private:
     bool load_or_create_identity();

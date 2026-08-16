@@ -14,7 +14,8 @@
 
 namespace clt {
 
-App::App(Config cfg) : cfg_(std::move(cfg)) {}
+App::App(Config cfg, std::unique_ptr<radio::Radio> radio, Clock& clock)
+    : cfg_(std::move(cfg)), loop_(clock), radio_(std::move(radio)) {}
 App::~App() = default;
 
 bool App::ensure_state_dir() {
@@ -93,7 +94,9 @@ bool App::start() {
     if (!channels_->load()) LOG_INFO("channels: using defaults (slot 0 = Public)");
 
     std::string error;
-    radio_ = make_radio(error);
+    // Non-null already only when one was handed to the constructor; otherwise
+    // the config picks the backend.
+    if (!radio_) radio_ = make_radio(error);
     if (!radio_) {
         LOG_ERROR("radio: %s", error.c_str());
         return false;
@@ -126,8 +129,8 @@ bool App::start() {
     info.max_channels = mesh::ChannelStore::kMaxChannels;
     metrics_ = std::make_unique<HostMetrics>(std::move(info), cfg_.state_dir);
 
-    session_ = std::make_unique<companion::Session>(*server_, *node_, *contacts_, *channels_,
-                                                    *radio_, *state_, *metrics_);
+    session_ = std::make_unique<companion::Session>(loop_.clock(), *server_, *node_, *contacts_,
+                                                    *channels_, *radio_, *state_, *metrics_);
     session_->attach();
 
     log_status();

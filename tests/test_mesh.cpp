@@ -9,6 +9,7 @@
 #include "mesh/node.h"
 #include "mesh/state_writer.h"
 #include "radio/mock_radio.h"
+#include "tests/gated_radio.h"
 #include "tests/packet_vectors.h"
 #include "tests/test_util.h"
 
@@ -16,37 +17,6 @@ using namespace clt;
 using namespace clt::test;
 using namespace clt::mesh;
 namespace pv = clt::pktvec;
-
-class GatedRadio final : public radio::Radio {
-public:
-    bool begin(EventLoop&, std::string&) override { return true; }
-    bool send(ByteView data) override {
-        if (!ready_ || busy_) return false;
-        busy_ = true;
-        send_count_++;
-        last_sent_.assign(data.begin(), data.end());
-        return true;
-    }
-    bool tx_busy() const override { return busy_; }
-    bool ready() const override { return ready_; }
-    const radio::RadioParams& params() const override { return params_; }
-    std::string describe() const override { return "gated test radio"; }
-
-    void set_ready(bool ready) { ready_ = ready; }
-    void complete_tx(uint32_t airtime_ms = 1) {
-        busy_ = false;
-        deliver_tx_done(airtime_ms);
-    }
-    size_t send_count() const { return send_count_; }
-    const Bytes& last_sent() const { return last_sent_; }
-
-private:
-    radio::RadioParams params_;
-    bool ready_ = false;
-    bool busy_ = false;
-    size_t send_count_ = 0;
-    Bytes last_sent_;
-};
 
 static void test_public_channel() {
     Channel pub = Channel::public_channel();

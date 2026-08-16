@@ -41,10 +41,11 @@ void put_padded(Bytes& out, ByteView data, size_t width) {
 
 }  // namespace
 
-Session::Session(Server& server, mesh::Node& node, mesh::ContactStore& contacts,
-                 mesh::ChannelStore& channels, radio::Radio& radio, mesh::StateWriter& state,
-                 const DeviceMetrics& metrics)
-    : server_(server),
+Session::Session(const Clock& clock, Server& server, mesh::Node& node,
+                 mesh::ContactStore& contacts, mesh::ChannelStore& channels, radio::Radio& radio,
+                 mesh::StateWriter& state, const DeviceMetrics& metrics)
+    : clock_(clock),
+      server_(server),
       node_(node),
       contacts_(contacts),
       channels_(channels),
@@ -363,7 +364,7 @@ Bytes Session::cmd_send_txt_msg(ByteView args) {
     auto ack = node_.send_text(*target, text, txt_type, timestamp, &err);
     if (!ack) return resp_err(send_error_code(err));
 
-    last_send_ms_ = millis();
+    last_send_ms_ = clock_.now_ms();
 
     Bytes out {kRespSent};
     out.push_back(target->path_known ? 0 : 1);  // 0 = direct, 1 = flood
@@ -517,7 +518,7 @@ void Session::on_message_stored() { reply(Bytes {kPushMsgWaiting}); }
 void Session::on_ack(ByteView ack_hash) {
     Bytes out {kPushSendConfirmed};
     put_bytes(out, ack_hash);
-    put_u32(out, last_send_ms_ ? millis() - last_send_ms_ : 0);
+    put_u32(out, last_send_ms_ ? clock_.now_ms() - *last_send_ms_ : 0);
     reply(out);
 }
 

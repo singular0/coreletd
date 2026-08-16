@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
 
     // Delivering a signal interrupts poll(); the loop then asks this predicate
     // whether it should exit. The handler itself only touches a sig_atomic_t.
-    app.set_interrupt_check([] { return g_stop != 0; });
+    app.loop().set_interrupt_check([] { return g_stop != 0; });
 
     app.run();
     app.request_stop();

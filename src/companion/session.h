@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include "companion/device_metrics.h"
@@ -7,6 +8,7 @@
 #include "mesh/node.h"
 #include "mesh/state_writer.h"
 #include "radio/radio.h"
+#include "util/clock.h"
 
 namespace clt::companion {
 
@@ -14,7 +16,10 @@ namespace clt::companion {
 // pushes mesh events back to the app.
 class Session : public mesh::Node::Delegate {
 public:
-    Session(Server& server, mesh::Node& node, mesh::ContactStore& contacts,
+    // The clock comes first for the same reason the loop does elsewhere: it is
+    // the one dependency that is not a peer subsystem. Session schedules
+    // nothing, it only measures how long a send took, so a Clock is enough.
+    Session(const Clock& clock, Server& server, mesh::Node& node, mesh::ContactStore& contacts,
             mesh::ChannelStore& channels, radio::Radio& radio, mesh::StateWriter& state,
             const DeviceMetrics& metrics);
 
@@ -59,6 +64,7 @@ private:
     // reports whether the last one reached disk.
     Bytes saved_reply();
 
+    const Clock& clock_;
     Server& server_;
     mesh::Node& node_;
     mesh::ContactStore& contacts_;
@@ -71,8 +77,10 @@ private:
     // answered — some clients probe with DEVICE_QUERY first.
     bool app_started_ = false;
     std::string app_name_;
-    // Round-trip timing for PUSH_CODE_SEND_CONFIRMED.
-    uint32_t last_send_ms_ = 0;
+    // Round-trip timing for PUSH_CODE_SEND_CONFIRMED. Empty until something has
+    // been sent — an elapsed time is not a value zero can stand in for, least of
+    // all on a clock a test starts at zero.
+    std::optional<uint32_t> last_send_ms_;
 };
 
 }  // namespace clt::companion

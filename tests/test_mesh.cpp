@@ -8,7 +8,6 @@
 #include "mesh/inbox.h"
 #include "mesh/node.h"
 #include "mesh/state_writer.h"
-#include "radio/mock_radio.h"
 #include "tests/gated_radio.h"
 #include "tests/packet_vectors.h"
 #include "tests/test_util.h"
@@ -294,8 +293,7 @@ static void test_oversized_encrypted_messages_are_rejected() {
     Contact& peer = *contacts.upsert(from_hex(pv::kPubB));
     ChannelStore channels;
     EventLoop loop;
-    radio::RadioParams params;
-    radio::MockRadio radio(params, radio::MockRadio::Options {});
+    GatedRadio radio;
     Dispatcher dispatcher(loop, radio);
     std::string error;
     CHECK(dispatcher.start(error));
@@ -526,8 +524,7 @@ static void test_unusable_contact_key_is_reported_as_such() {
 
     ChannelStore channels;
     EventLoop loop;
-    radio::RadioParams params;
-    radio::MockRadio radio(params, radio::MockRadio::Options {});
+    GatedRadio radio;
     Dispatcher dispatcher(loop, radio);
     std::string error;
     CHECK(dispatcher.start(error));
@@ -719,11 +716,11 @@ static void test_received_message_marks_store_dirty() {
     Contact& peer = *contacts.upsert(from_hex(pv::kPubA));
     ChannelStore channels;
     EventLoop loop;
-    radio::RadioParams params;
-    radio::MockRadio radio(params, radio::MockRadio::Options {});
+    GatedRadio radio;
     Dispatcher dispatcher(loop, radio);
     std::string error;
     CHECK(dispatcher.start(error));
+    radio.set_ready(true);
 
     Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
     node.start();
@@ -754,11 +751,11 @@ static void test_direct_ack_marks_store_dirty() {
     Contact& peer = *contacts.upsert(from_hex(pv::kPubB));
     ChannelStore channels;
     EventLoop loop;
-    radio::RadioParams params;
-    radio::MockRadio radio(params, radio::MockRadio::Options {});
+    GatedRadio radio;
     Dispatcher dispatcher(loop, radio);
     std::string error;
     CHECK(dispatcher.start(error));
+    radio.set_ready(true);
 
     Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
     node.start();

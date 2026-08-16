@@ -154,8 +154,6 @@ std::vector<Setting> settings(Config& cfg, Raw& raw) {
         Str("channels_path", cfg.channels_path),
 
         // --- radio ---
-        Bool("mock_radio", cfg.use_mock_radio),
-        Str("mock_replay_file", cfg.mock_replay_file),
         Real("lora_freq", cfg.radio.freq_mhz, valid_freq,
              "0 (unset) or between 150 and 960 MHz"),
         Real("lora_bw", cfg.radio.bw_khz, supported_bandwidth,
@@ -263,7 +261,7 @@ bool Config::load(const std::string& path, std::string& error) {
         return false;
     }
 
-    if (radio.freq_mhz <= 0 && !use_mock_radio) {
+    if (radio.freq_mhz <= 0) {
         error =
             "lora_freq is required — set the frequency for your region "
             "(e.g. 869.618 for EU868, 910.525 for US915)";

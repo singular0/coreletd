@@ -325,28 +325,12 @@ static void test_pushes_wait_for_app_start() {
     CHECK_BYTES(subview(logged, 3), from_hex(pv::kTextPacket));
 }
 
-// The seam must not change what the daemon does on its own: handed no radio, it
-// still builds the one the config asks for, and still generates an identity on
-// a first run.
-static void test_app_builds_its_own_radio() {
-    const std::string dir = fresh_state_dir("mock");
-    Config cfg = harness_config(dir);
-    cfg.use_mock_radio = true;
-
-    ManualClock clock;
-    App app(std::move(cfg), nullptr, clock);
-    CHECK(app.start());
-    CHECK(std::filesystem::exists(dir + "/identity"));
-    app.request_stop();
-}
-
 int main() {
     if (!crypto::init()) return 2;
 
     test_received_text_is_acked_on_air();
     test_companion_app_round_trip();
     test_pushes_wait_for_app_start();
-    test_app_builds_its_own_radio();
 
     return finish("app");
 }

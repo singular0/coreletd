@@ -41,8 +41,6 @@ struct Config {
 
     radio::RadioParams radio;
     SpiConfig spi;
-    bool use_mock_radio = false;
-    std::string mock_replay_file;
 
     mesh::Node::Config node;
     companion::Server::Options companion;

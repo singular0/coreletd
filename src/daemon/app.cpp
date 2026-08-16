@@ -3,7 +3,6 @@
 #include <filesystem>
 
 #include "crypto/crypto.h"
-#include "radio/mock_radio.h"
 #include "util/clock.h"
 #include "util/hex.h"
 #include "util/log.h"
@@ -56,13 +55,6 @@ bool App::load_or_create_identity() {
 }
 
 std::unique_ptr<radio::Radio> App::make_radio(std::string& error) {
-    if (cfg_.use_mock_radio) {
-        radio::MockRadio::Options opts;
-        opts.replay_file = cfg_.mock_replay_file;
-        opts.repeat = true;
-        return std::make_unique<radio::MockRadio>(cfg_.radio, std::move(opts));
-    }
-
 #if CORELETD_HAVE_SX1262
     radio::Sx1262::Pins pins;
     pins.spidev = cfg_.spi.spidev;
@@ -76,9 +68,7 @@ std::unique_ptr<radio::Radio> App::make_radio(std::string& error) {
     pins.spi_speed_hz = cfg_.spi.spi_speed_hz;
     return std::make_unique<radio::Sx1262>(cfg_.radio, pins, cfg_.spi.retry_interval_s * 1000);
 #else
-    error =
-        "this build has no SX1262 backend (built without libgpiod). "
-        "Set mock_radio = 1 to run without hardware.";
+    error = "this build has no radio backend (built with CORELETD_RADIO_SX1262=OFF)";
     return nullptr;
 #endif
 }
@@ -96,7 +86,7 @@ bool App::start() {
 
     std::string error;
     // Non-null already only when one was handed to the constructor; otherwise
-    // the config picks the backend.
+    // construct the production backend compiled into this build.
     if (!radio_) radio_ = make_radio(error);
     if (!radio_) {
         LOG_ERROR("radio: %s", error.c_str());

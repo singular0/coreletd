@@ -94,7 +94,6 @@ add_library(coreletd_core STATIC
     src/proto/packet.cpp
     src/proto/payloads.cpp
     src/radio/radio.cpp
-    src/radio/mock_radio.cpp
     src/mesh/contacts.cpp
     src/mesh/channels.cpp
     src/mesh/dispatcher.cpp

@@ -85,26 +85,3 @@ rail — describe the hardware rather than any particular unit, and every one is
 The daemon log is fetched to `dist/e2e-logs/` after each run, and a run that dies half way still
 stops the daemon it started — a leftover one holds the SPI bus and the GPIO lines, so the next run
 would fail to open the radio at all.
-
-## End-to-end test, no radio
-
-`e2e_companion_test.py` drives a *running* daemon over the companion TCP socket the way the app
-does, and checks the replies. To exercise the full receive path, start the daemon with a known
-identity and a replay file:
-
-```sh
-# use node B's key so the canned A->B message is addressed to us
-grep -o 'kPrivB = "[0-9a-f]*"' tests/packet_vectors.h | sed 's/.*"\(.*\)"/\1/' > state/identity
-chmod 600 state/identity
-
-# replay a signed advert and an encrypted message from node A
-grep -o 'kAdvertPacket = "[0-9a-f]*"' tests/packet_vectors.h | sed 's/.*"\(.*\)"/\1/'  > packets.hex
-grep -o 'kTextPacket   = "[0-9a-f]*"' tests/packet_vectors.h | sed 's/.*"\(.*\)"/\1/' >> packets.hex
-
-./build/coreletd --config test.ini &   # mock_radio = 1, mock_replay_file = packets.hex
-sleep 10                                 # let both packets play in
-python3 tools/e2e_companion_test.py 5999
-```
-
-It asserts the advert becomes a contact, the message decrypts to its expected plaintext, and the
-ack hash matches the reference vector.

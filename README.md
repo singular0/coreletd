@@ -140,9 +140,9 @@ You get no man page and no upgrade path this way, and removing it is your proble
 <details>
 <summary>Building without a uConsole</summary>
 
-The SX1262 backend is Linux-only and is skipped automatically on anything else, so a macOS or plain
-Linux checkout builds and tests the whole daemon against the mock radio. That is enough to develop
-against, and enough to run a client against a node that cannot transmit.
+The test suite supplies its own test radios, so building and testing do not require radio hardware.
+The SX1262 backend is Linux-only and is skipped automatically on macOS; a daemon built there has no
+radio backend and will not start, but all hardware-independent development and tests remain available.
 
 ```sh
 brew install cmake libsodium openssl@3 pkgconf     # macOS
@@ -254,12 +254,6 @@ WireGuard instead:
 ```sh
 ssh -L 5000:127.0.0.1:5000 uconsole.local
 ```
-
-## Trying it without a radio
-
-Set `mock_radio = 1` and the whole daemon comes up with a fake radio: transmissions are logged and
-discarded, and `mock_replay_file` feeds a file of hex packets (one per line, `#` comments allowed)
-into the receive path. Useful for exercising a client against a node that cannot transmit.
 
 ## Troubleshooting
 

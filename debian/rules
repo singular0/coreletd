@@ -15,7 +15,7 @@ manifest = $(CURDIR)/.coreletd-version.cmake
 
 # The SX1262 backend is what the package exists for, so ask for it explicitly
 # rather than relying on the platform default: a missing libgpiod should fail
-# the build, not silently produce a mock-radio-only binary.
+# the build, not silently produce a binary with no radio backend.
 override_dh_auto_configure:
 	dh_auto_configure -- \
 		$(if $(wildcard $(manifest)),-DCORELETD_VERSION_MANIFEST=$(manifest)) \

@@ -25,9 +25,9 @@ cmake --build build -j4
 ctest --test-dir build --output-on-failure
 ```
 
-`CORELETD_RADIO_SX1262` defaults on for Linux and off everywhere else, so a macOS checkout builds
-and tests the entire daemon against the mock radio — which is enough for everything except driver
-work. `CORELETD_HAVE_SX1262` guards the code that needs the real backend.
+`CORELETD_RADIO_SX1262` defaults on for Linux and off everywhere else. The tests inject test-only
+radios, so a macOS checkout still builds and tests all hardware-independent code, but its daemon has
+no runnable radio backend. `CORELETD_HAVE_SX1262` guards the code that needs the real backend.
 
 Sources are listed explicitly in `CMakeLists.txt`; a new `.cpp` must be added there or it silently
 won't compile. Tests are one CTest binary per `tests/test_<name>.cpp`, registered by the `foreach`
@@ -44,7 +44,7 @@ src/
   util/       bytes, hex, INI, logging, clock, atomic file replacement
   crypto/     Ed25519 (expanded-key), X25519, AES-128-ECB + HMAC, identity
   proto/      packet header/path codec, payload codecs
-  radio/      Radio interface, duty cycle, mock radio, SX1262 (spidev + libgpiod)
+  radio/      Radio interface, duty cycle, SX1262 (spidev + libgpiod)
   mesh/       dispatcher, contacts, channels, sender, inbox, node, state writer
   companion/  frame codec, TCP server, command session
   daemon/     config, event loop, host metrics, App wiring
@@ -165,15 +165,11 @@ evidence of wire compatibility rather than self-consistency. Treat them as groun
 protocol changes, new bytes must be sourced from another implementation, never adjusted to match
 ours.
 
-Two end-to-end scripts live in `tools/`, and `tools/README.md` documents both in detail:
-
-- `e2e_companion_test.py` drives a *running* daemon over the companion socket the way an app does,
-  against a mock radio replaying canned packets.
-- `hw_e2e_test.py` deploys to a real uConsole, runs against the real SX1262, and asserts against a
-  second independent MeshCore node over the air — the only test that proves the driver keys the
-  radio and that another vendor's firmware accepts our packets. It needs the host named explicitly
-  (`--host`, or `CORELETD_E2E_HOST`); the node identity is deliberately kept between runs so peers
-  don't accumulate dead contacts.
+The end-to-end script `tools/hw_e2e_test.py`, documented in `tools/README.md`, deploys to a real
+uConsole, runs against the real SX1262, and asserts against a second independent MeshCore node over
+the air — the only test that proves the driver keys the radio and that another vendor's firmware
+accepts our packets. It needs the host named explicitly (`--host`, or `CORELETD_E2E_HOST`); the node
+identity is deliberately kept between runs so peers don't accumulate dead contacts.
 
 The validated-on-hardware run behind the README's claim: uConsole (CM4, Debian trixie) + AIO v2
 against a LilyGo T-Echo on MeshCore v1.17.0, 869.618 MHz — adverts signature-verified (RSSI −41,
@@ -246,7 +242,7 @@ tags, so `git describe` would find nothing.
 
 `debian/rules` forces `-DCORELETD_RADIO_SX1262=ON` rather than trusting the platform default: the
 package exists for that backend, so a missing libgpiod must fail the build instead of quietly
-shipping a mock-radio-only binary.
+shipping a binary with no radio backend.
 
 The package installs the unit, the udev rules and a `coreletd` user and group, and **must not
 enable the service** (`dh_installsystemd --no-enable`): starting it puts a 22 dBm PA on the air on a

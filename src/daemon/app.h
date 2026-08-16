@@ -24,10 +24,10 @@ namespace clt {
 class App {
 public:
     // The radio and the clock are the two things the daemon builds for itself
-    // and a test replaces. A null radio means the config picks the backend,
-    // which is what the daemon wants; handing one in stands the whole stack up
-    // against a radio the test drives. The clock reaches every subsystem
-    // through the loop, so a ManualClock runs all of it on virtual time.
+    // and a test replaces. A null radio means the daemon constructs its
+    // compiled-in backend; handing one in stands the whole stack up against a
+    // radio the test drives. The clock reaches every subsystem through the
+    // loop, so a ManualClock runs all of it on virtual time.
     explicit App(Config cfg, std::unique_ptr<radio::Radio> radio = nullptr,
                  Clock& clock = millis_clock());
     ~App();

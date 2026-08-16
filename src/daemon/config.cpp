@@ -146,55 +146,57 @@ std::vector<Setting> settings(Config& cfg, Raw& raw) {
     constexpr int64_t kMaxTimerDelaySeconds = std::numeric_limits<uint32_t>::max() / 1000;
 
     return {
-        // --- logging and storage ---
-        Str("log_level", raw.log_level),
-        Str("state_dir", cfg.state_dir),
-        Str("identity_path", cfg.identity_path),
-        Str("contacts_path", cfg.contacts_path),
-        Str("channels_path", cfg.channels_path),
-
         // --- radio ---
-        Real("lora_freq", cfg.radio.freq_mhz, valid_freq,
+        Real("radio.lora_freq", cfg.radio.freq_mhz, valid_freq,
              "0 (unset) or between 150 and 960 MHz"),
-        Real("lora_bw", cfg.radio.bw_khz, supported_bandwidth,
+        Real("radio.lora_bw", cfg.radio.bw_khz, supported_bandwidth,
              "a bandwidth supported by SX1262 (7.81 to 500 kHz)"),
-        Int("lora_sf", cfg.radio.sf, 5, 12),
-        Int("lora_cr", cfg.radio.cr, 5, 8),
-        Int("lora_tx_power", cfg.radio.tx_power_dbm, -9, 22),
-        Int("lora_preamble", cfg.radio.preamble, 1, kMaxU16),
-        Int("lora_sync_word", cfg.radio.sync_word, 0, kMaxU8),
-        Real("lora_tcxo", cfg.radio.tcxo_voltage, valid_tcxo,
-             "0 (disabled) or between 1.6 and 3.3 volts"),
-        Bool("dio2_as_rf_switch", cfg.radio.dio2_as_rf_switch),
-        Bool("rx_boosted_gain", cfg.radio.rx_boosted_gain),
-        Int("current_limit", cfg.radio.current_limit_ma, 1, 157),
-        Real("duty_cycle", cfg.radio.duty_cycle_pct, valid_duty_cycle,
+        Int("radio.lora_sf", cfg.radio.sf, 5, 12),
+        Int("radio.lora_cr", cfg.radio.cr, 5, 8),
+        Int("radio.lora_tx_power", cfg.radio.tx_power_dbm, -9, 22),
+        Int("radio.lora_preamble", cfg.radio.preamble, 1, kMaxU16),
+        Int("radio.lora_sync_word", cfg.radio.sync_word, 0, kMaxU8),
+        Real("radio.duty_cycle", cfg.radio.duty_cycle_pct, valid_duty_cycle,
              "greater than 0 and less than 100 percent"),
 
-        // --- SPI / GPIO ---
-        Str("spidev", cfg.spi.spidev),
-        Str("lora_gpiochip", cfg.spi.gpiochip),
-        Int("lora_irq_pin", cfg.spi.irq_pin, 0, kMaxInt),
-        Int("lora_busy_pin", cfg.spi.busy_pin, 0, kMaxInt),
-        Int("lora_reset_pin", cfg.spi.reset_pin, 0, kMaxInt),
+        // --- hardware ---
+        Str("hardware.spidev", cfg.spi.spidev),
+        Str("hardware.lora_gpiochip", cfg.spi.gpiochip),
+        Int("hardware.lora_irq_pin", cfg.spi.irq_pin, 0, kMaxInt),
+        Int("hardware.lora_busy_pin", cfg.spi.busy_pin, 0, kMaxInt),
+        Int("hardware.lora_reset_pin", cfg.spi.reset_pin, 0, kMaxInt),
         // -1 on these three: driven by the SPI controller, or not wired at all.
-        Int("lora_nss_pin", cfg.spi.nss_pin, -1, kMaxInt),
-        Int("lora_rxen_pin", cfg.spi.rxen_pin, -1, kMaxInt),
-        Int("lora_txen_pin", cfg.spi.txen_pin, -1, kMaxInt),
-        Int("spi_speed", cfg.spi.spi_speed_hz, 1, 16000000),
-        Int("lora_retry_interval", cfg.spi.retry_interval_s, 0, 86400),
+        Int("hardware.lora_nss_pin", cfg.spi.nss_pin, -1, kMaxInt),
+        Int("hardware.lora_rxen_pin", cfg.spi.rxen_pin, -1, kMaxInt),
+        Int("hardware.lora_txen_pin", cfg.spi.txen_pin, -1, kMaxInt),
+        Int("hardware.lora_retry_interval", cfg.spi.retry_interval_s, 0, 86400),
+        Bool("hardware.dio2_as_rf_switch", cfg.radio.dio2_as_rf_switch),
+        Real("hardware.lora_tcxo", cfg.radio.tcxo_voltage, valid_tcxo,
+             "0 (disabled) or between 1.6 and 3.3 volts"),
+        Bool("hardware.rx_boosted_gain", cfg.radio.rx_boosted_gain),
+        Int("hardware.current_limit", cfg.radio.current_limit_ma, 1, 157),
+        Int("hardware.spi_speed", cfg.spi.spi_speed_hz, 1, 16000000),
 
         // --- node ---
-        Str("advert_name", cfg.node.name),
-        Int("advert_interval", cfg.node.advert_interval_s, 0, kMaxTimerDelaySeconds),
-        Bool("repeat", cfg.node.repeat),
-        Int("max_hops", cfg.node.max_hops, 0, proto::kMaxPathSize),
-        Real("lat", raw.lat, valid_lat, "between -90 and 90 degrees"),
-        Real("lon", raw.lon, valid_lon, "between -180 and 180 degrees"),
+        Str("node.advert_name", cfg.node.name),
+        Int("node.advert_interval", cfg.node.advert_interval_s, 0, kMaxTimerDelaySeconds),
+        Real("node.lat", raw.lat, valid_lat, "between -90 and 90 degrees"),
+        Real("node.lon", raw.lon, valid_lon, "between -180 and 180 degrees"),
+        Bool("node.repeat", cfg.node.repeat),
+        Int("node.max_hops", cfg.node.max_hops, 0, proto::kMaxPathSize),
 
         // --- companion ---
-        Str("companion_bind", cfg.companion.bind_addr),
-        Int("companion_port", cfg.companion.port, 1, kMaxU16),
+        Str("companion.companion_bind", cfg.companion.bind_addr),
+        Int("companion.companion_port", cfg.companion.port, 1, kMaxU16),
+
+        // --- storage ---
+        Str("storage.state_dir", cfg.state_dir),
+        Str("storage.identity_path", cfg.identity_path),
+        Str("storage.contacts_path", cfg.contacts_path),
+        Str("storage.channels_path", cfg.channels_path),
+
+        // --- logging ---
+        Str("logging.log_level", raw.log_level),
     };
 }
 
@@ -257,13 +259,13 @@ bool Config::load(const std::string& path, std::string& error) {
         if (!apply(ini, s, error)) return false;
 
     if (!log_parse_level(raw.log_level, log_level)) {
-        error = "log_level: unknown level \"" + raw.log_level + "\"";
+        error = "logging.log_level: unknown level \"" + raw.log_level + "\"";
         return false;
     }
 
     if (radio.freq_mhz <= 0) {
         error =
-            "lora_freq is required — set the frequency for your region "
+            "radio.lora_freq is required — set the frequency for your region "
             "(e.g. 869.618 for EU868, 910.525 for US915)";
         return false;
     }

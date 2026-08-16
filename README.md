@@ -193,13 +193,15 @@ coreletd will fail with `EBUSY`.
 sudoedit /etc/coreletd/coreletd.ini
 ```
 
-**`lora_freq` is required and has no default.** Which band you may transmit on is a legal question,
-not a technical one, so the daemon refuses to start until you answer it — `869.618` for EU868,
-`910.525` for US915. Every node on a mesh must also agree on `lora_bw`, `lora_sf` and `lora_cr`; the
-shipped values are MeshCore's standard settings.
+The file is divided into `[radio]`, `[hardware]`, `[node]`, `[companion]`, `[storage]`, and
+`[logging]` sections. **`lora_freq` in `[radio]` is required and has no default.** Which band you may
+transmit on is a legal question, not a technical one, so the daemon refuses to start until you
+answer it — `869.618` for EU868, `910.525` for US915. Every node on a mesh must also agree on
+`lora_bw`, `lora_sf` and `lora_cr`; the shipped values are MeshCore's standard settings.
 
-Worth setting while you are in there: `advert_name` (what other nodes see), `lat` / `lon` if you
-want to publish a position, and `duty_cycle` for your band. The file documents every option.
+Worth setting while you are in there: `advert_name` in `[node]` (what other nodes see), `lat` / `lon`
+if you want to publish a position, and `duty_cycle` in `[radio]` for your band. The file documents
+every option.
 
 ## Run
 
@@ -246,7 +248,8 @@ node that never speaks again. Purging the package leaves the file in place for e
 ## Security
 
 The companion protocol has **no authentication of any kind**. Anyone who can reach the port can read
-your messages and send messages as you. `companion_bind` therefore defaults to `127.0.0.1`.
+your messages and send messages as you. `companion_bind` in `[companion]` therefore defaults to
+`127.0.0.1`.
 
 Only widen it to `0.0.0.0` on a network you control, and preferably reach it over an SSH tunnel or
 WireGuard instead:
@@ -261,8 +264,8 @@ ssh -L 5000:127.0.0.1:5000 uconsole.local
 
 **`XOSC_START_ERR`, device error `0x0020`, at startup.** Expected and harmless. The SX1262 latches
 it at power-up because it tries to start its oscillator before DIO3 is configured to power the TCXO;
-it is cleared after calibration. If it is *still* reported after that, `lora_tcxo` does not match
-your board.
+it is cleared after calibration. If it is *still* reported after that, `lora_tcxo` in `[hardware]`
+does not match your board.
 
 **The daemon starts but hears nothing.** Air settings must match the rest of the mesh exactly —
 frequency, bandwidth, spreading factor and coding rate. A mismatch is silence, not an error.

@@ -469,7 +469,7 @@ Bytes Session::cmd_set_channel(ByteView args) {
 // would change only the in-memory copy, so the edit would revert on the next
 // restart with nothing to tell the app it had been lost.
 Bytes Session::cmd_set_advert_name(ByteView args) {
-    LOG_INFO("companion: advert name change refused (set advert_name in the config file)");
+    LOG_INFO("companion: advert name change refused (set [node] advert_name in the config file)");
     return Bytes {kRespDisabled};
 }
 

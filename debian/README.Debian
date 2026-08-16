@@ -11,8 +11,8 @@ configuration first:
 
     sudoedit /etc/coreletd/coreletd.ini
 
-`lora_freq` is required and has no built-in default; the shipped file leaves
-it unset. Set the plan for your region, fit an antenna, then:
+`lora_freq` in `[radio]` is required and has no built-in default; the shipped
+file leaves it unset. Set the plan for your region, fit an antenna, then:
 
     sudo systemctl enable --now coreletd
     journalctl -u coreletd -f
@@ -35,7 +35,8 @@ Before the first start
 2. Turn on the LoRa power rail (GPIO16). The daemon does not switch it -- it
    is board-level state owned by whatever manages the uConsole's power. Until
    it is high the SX1262 is unpowered; the daemon starts anyway and connects
-   to the radio on its next retry (lora_retry_interval, 10 seconds).
+   to the radio on its next retry (`lora_retry_interval` in `[hardware]`, 10
+   seconds).
 
 3. Stop meshtasticd if it is installed -- it holds the same GPIO lines and
    coreletd will fail with EBUSY.
@@ -67,8 +68,8 @@ Companion protocol access
 -------------------------
 
 The companion protocol has no authentication at all -- anyone who can reach
-the port can read your messages and send as you. `companion_bind` therefore
-defaults to 127.0.0.1. Only widen it on a network you control, ideally behind
-an SSH tunnel or WireGuard.
+the port can read your messages and send as you. `companion_bind` in
+`[companion]` therefore defaults to 127.0.0.1. Only widen it on a network you
+control, ideally behind an SSH tunnel or WireGuard.
 
  -- Denis Yantarev <denis.yantarev@gmail.com>, Wed, 12 Aug 2026 14:40:00 +0000

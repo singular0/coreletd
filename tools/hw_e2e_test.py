@@ -573,23 +573,29 @@ class Harness:
 
         ini = "\n".join([
             "# Written by tools/hw_e2e_test.py. Edits here are overwritten.",
+            "[radio]",
             f"lora_freq = {self.a.freq}",
             f"lora_bw = {self.a.bw}",
             f"lora_sf = {self.a.sf}",
             f"lora_cr = {self.a.cr}",
             f"lora_tx_power = {self.a.tx_power}",
+            "[hardware]",
             f"spidev = {self.a.spidev}",
             f"lora_gpiochip = {self.a.gpiochip}",
             f"lora_irq_pin = {self.a.irq_pin}",
             f"lora_busy_pin = {self.a.busy_pin}",
             f"lora_reset_pin = {self.a.reset_pin}",
+            "[storage]",
             f"state_dir = {self.home}/{self.a.remote_dir}/state",
+            "[node]",
             f"advert_name = {self.a.node_name}",
             # Adverts on demand only: every assertion below is about a packet
             # this script asked for.
             "advert_interval = 0",
+            "[companion]",
             "companion_bind = 127.0.0.1",
             f"companion_port = {self.a.remote_port}",
+            "[logging]",
             "log_level = debug",
             "",
         ])

@@ -9,9 +9,8 @@
 
 namespace clt {
 
-// Flat `key = value` config, matching the shape of the MeshCore Linux port's
-// meshcored.ini. `[section]` headers are supported and simply prefix subsequent
-// keys as `section.key`, so a flat file and a sectioned one can coexist.
+// INI config reader. `[section]` headers prefix subsequent keys as
+// `section.key`.
 class Ini {
 public:
     // Returns false and fills `error` on unreadable file or malformed line.

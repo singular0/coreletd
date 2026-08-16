@@ -43,7 +43,19 @@ Print the version and exit.
 .BR \-h ", " \-\-help
 Print a usage summary and exit.
 .SH CONFIGURATION
+Settings are grouped into
+.BR [radio] ,
+.BR [hardware] ,
+.BR [node] ,
+.BR [companion] ,
+.BR [storage]
+and
+.B [logging]
+sections.
+.PP
 .B lora_freq
+in
+.B [radio]
 is required and has no default: which band you may transmit on is a legal
 question, not a technical one. The daemon refuses to start without it. Every
 node on a mesh must agree on
@@ -60,9 +72,11 @@ does not switch that rail: turn it on with whatever manages the board's power.
 A radio that does not answer is therefore not a startup failure. The daemon
 starts without one, retries every
 .B lora_retry_interval
-seconds (10 by default, 0 to disable), and picks the radio up as soon as it
-appears. The same check notices a rail switched off while running: transmits
-are held and the radio is brought back when power returns.
+seconds from
+.B [hardware]
+(10 by default, 0 to disable), and picks the radio up as soon as it appears.
+The same check notices a rail switched off while running: transmits are held
+and the radio is brought back when power returns.
 .SH FILES
 .TP
 .I /etc/coreletd/coreletd.ini
@@ -88,6 +102,8 @@ not run as root.
 The companion protocol has no authentication whatsoever. Anyone who can reach
 the port can read messages and send as this node, so
 .B companion_bind
+in
+.B [companion]
 defaults to 127.0.0.1. Widen it only on a trusted network, ideally behind an
 SSH tunnel or WireGuard.
 .SH EXIT STATUS

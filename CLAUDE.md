@@ -135,12 +135,12 @@ mirrors them in its `protocol/protocol.h`). Never renumber; append only.
 - **The LoRa rail is not ours to switch.** GPIO16 gates power to the SX1262 on the AIO v2 and is
   shared board-level state; while it is off, every SPI read returns zeroes. An absent radio is
   therefore a normal state, not a startup failure: the daemon comes up without one, retries every
-  `lora_retry_interval` seconds, and notices the rail going away mid-run.
+  `[hardware] lora_retry_interval` seconds, and notices the rail going away mid-run.
 - **`XOSC_START_ERR` (`0x0020`) at power-up is not a fault.** The chip latches it because it starts
   its oscillator before DIO3 is configured to drive the TCXO; calibration clears it. Still reported
-  afterwards means `lora_tcxo` genuinely doesn't match the board.
+  afterwards means `[hardware] lora_tcxo` genuinely doesn't match the board.
 - DIO2 drives the RF switch, DIO3 the TCXO at 1.8 V, and chip select is the kernel's SPI1-CE0, which
-  is why `lora_nss_pin` is unset.
+  is why `[hardware] lora_nss_pin` is unset.
 
 ## Configuration
 
@@ -150,8 +150,8 @@ document it in `etc/coreletd.ini`: `tests/test_ini.cpp` reads the shipped file a
 agree in both directions, so an undocumented key and a documented non-key each fail the build's
 tests.
 
-`lora_freq` deliberately has no default: transmitting on the wrong band is a legal problem, so the
-daemon refuses to start rather than picking one.
+`[radio] lora_freq` deliberately has no default: transmitting on the wrong band is a legal problem,
+so the daemon refuses to start rather than picking one.
 
 ## Testing
 

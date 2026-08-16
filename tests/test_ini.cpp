@@ -134,24 +134,36 @@ static void test_unread_keys_are_tracked() {
 
 static void test_retry_interval() {
     // Absent: the radio is retried every 10 s by default.
-    std::string path = write_temp("lora_freq = 869.618\n");
+    std::string path = write_temp("[radio]\nlora_freq = 869.618\n");
     Config def;
     std::string error;
     CHECK(def.load(path, error));
     CHECK_EQ(def.spi.retry_interval_s, uint32_t {10});
 
-    path = write_temp("lora_freq = 869.618\nlora_retry_interval = 45\n");
+    path = write_temp(
+        "[radio]\n"
+        "lora_freq = 869.618\n"
+        "[hardware]\n"
+        "lora_retry_interval = 45\n");
     Config cfg;
     CHECK(cfg.load(path, error));
     CHECK_EQ(cfg.spi.retry_interval_s, uint32_t {45});
 
     // 0 is meaningful: it turns retrying off entirely.
-    path = write_temp("lora_freq = 869.618\nlora_retry_interval = 0\n");
+    path = write_temp(
+        "[radio]\n"
+        "lora_freq = 869.618\n"
+        "[hardware]\n"
+        "lora_retry_interval = 0\n");
     Config off;
     CHECK(off.load(path, error));
     CHECK_EQ(off.spi.retry_interval_s, uint32_t {0});
 
-    path = write_temp("lora_freq = 869.618\nlora_retry_interval = -5\n");
+    path = write_temp(
+        "[radio]\n"
+        "lora_freq = 869.618\n"
+        "[hardware]\n"
+        "lora_retry_interval = -5\n");
     Config bad;
     std::string bad_error;
     CHECK(!bad.load(path, bad_error));
@@ -160,8 +172,16 @@ static void test_retry_interval() {
     std::remove(path.c_str());
 }
 
+static std::string as_sectioned_setting(const std::string& setting) {
+    size_t dot = setting.find('.');
+    CHECK(dot != std::string::npos);
+    if (dot == std::string::npos) return setting;
+    return "[" + setting.substr(0, dot) + "]\n" + setting.substr(dot + 1) + "\n";
+}
+
 static void check_config_rejected(const std::string& setting) {
-    std::string path = write_temp("lora_freq = 869.618\n" + setting + "\n");
+    std::string path =
+        write_temp("[radio]\nlora_freq = 869.618\n" + as_sectioned_setting(setting));
     Config cfg;
     std::string error;
     CHECK(!cfg.load(path, error));
@@ -171,43 +191,44 @@ static void check_config_rejected(const std::string& setting) {
 static void test_config_rejects_malformed_and_unsafe_values() {
     // Malformed values must fail startup instead of silently selecting the
     // defaults. Cover each parser kind used by Config.
-    check_config_rejected("lora_sf = eight");
-    check_config_rejected("duty_cycle = often");
-    check_config_rejected("repeat = perhaps");
+    check_config_rejected("radio.lora_sf = eight");
+    check_config_rejected("radio.duty_cycle = often");
+    check_config_rejected("node.repeat = perhaps");
 
     // Narrow integer fields and timer multiplication cannot wrap.
-    check_config_rejected("lora_preamble = 65536");
-    check_config_rejected("lora_sync_word = 256");
-    check_config_rejected("advert_interval = -1");
-    check_config_rejected("advert_interval = 4294968");
-    check_config_rejected("max_hops = -1");
-    check_config_rejected("max_hops = 65");
-    check_config_rejected("companion_port = 0");
-    check_config_rejected("companion_port = 65536");
+    check_config_rejected("radio.lora_preamble = 65536");
+    check_config_rejected("radio.lora_sync_word = 256");
+    check_config_rejected("node.advert_interval = -1");
+    check_config_rejected("node.advert_interval = 4294968");
+    check_config_rejected("node.max_hops = -1");
+    check_config_rejected("node.max_hops = 65");
+    check_config_rejected("companion.companion_port = 0");
+    check_config_rejected("companion.companion_port = 65536");
 
     // Values sent to the radio must remain within SX1262 limits.
-    check_config_rejected("lora_freq = 149.9");
-    check_config_rejected("lora_freq = 960.1");
-    check_config_rejected("lora_bw = 100");
-    check_config_rejected("lora_tcxo = 1.5");
-    check_config_rejected("lora_tcxo = 3.4");
-    check_config_rejected("current_limit = 0");
-    check_config_rejected("current_limit = 158");
-    check_config_rejected("spi_speed = 0");
-    check_config_rejected("spi_speed = 16000001");
+    check_config_rejected("radio.lora_freq = 149.9");
+    check_config_rejected("radio.lora_freq = 960.1");
+    check_config_rejected("radio.lora_bw = 100");
+    check_config_rejected("hardware.lora_tcxo = 1.5");
+    check_config_rejected("hardware.lora_tcxo = 3.4");
+    check_config_rejected("hardware.current_limit = 0");
+    check_config_rejected("hardware.current_limit = 158");
+    check_config_rejected("hardware.spi_speed = 0");
+    check_config_rejected("hardware.spi_speed = 16000001");
 
     // Duty-cycle enforcement must never be disabled by an invalid percentage.
-    check_config_rejected("duty_cycle = 0");
-    check_config_rejected("duty_cycle = 100");
-    check_config_rejected("duty_cycle = nan");
+    check_config_rejected("radio.duty_cycle = 0");
+    check_config_rejected("radio.duty_cycle = 100");
+    check_config_rejected("radio.duty_cycle = nan");
 
-    check_config_rejected("lat = -90.1");
-    check_config_rejected("lat = nan");
-    check_config_rejected("lon = 180.1");
+    check_config_rejected("node.lat = -90.1");
+    check_config_rejected("node.lat = nan");
+    check_config_rejected("node.lon = 180.1");
 }
 
 static void test_config_accepts_valid_boundaries() {
     std::string path = write_temp(
+        "[radio]\n"
         "lora_freq = 150\n"
         "lora_bw = 7.81\n"
         "lora_sf = 5\n"
@@ -215,15 +236,18 @@ static void test_config_accepts_valid_boundaries() {
         "lora_tx_power = -9\n"
         "lora_preamble = 1\n"
         "lora_sync_word = 255\n"
+        "duty_cycle = 0.01\n"
+        "[hardware]\n"
         "lora_tcxo = 0\n"
         "current_limit = 157\n"
-        "duty_cycle = 0.01\n"
         "spi_speed = 16000000\n"
         "lora_retry_interval = 0\n"
+        "[node]\n"
         "advert_interval = 4294967\n"
         "max_hops = 64\n"
         "lat = -90\n"
         "lon = 180\n"
+        "[companion]\n"
         "companion_port = 65535\n");
     Config cfg;
     std::string error;
@@ -236,6 +260,15 @@ static void test_config_accepts_valid_boundaries() {
     CHECK_EQ(cfg.node.lon_e6, int32_t {180000000});
 }
 
+static void test_config_requires_sections() {
+    std::string path = write_temp("lora_freq = 869.618\n");
+    Config cfg;
+    std::string error;
+    CHECK(!cfg.load(path, error));
+    CHECK(error.find("radio.lora_freq") != std::string::npos);
+    std::remove(path.c_str());
+}
+
 // Every `key = value` in the shipped file, commented-out samples included. A
 // commented line only counts when the '=' is spaced, which is how the file
 // writes every setting — that is what keeps unrelated snippets in the prose
@@ -243,11 +276,16 @@ static void test_config_accepts_valid_boundaries() {
 static std::vector<std::string> shipped_ini_keys() {
     std::ifstream in(std::string(CORELETD_SOURCE_DIR) + "/etc/coreletd.ini");
     std::vector<std::string> keys;
-    std::string line;
+    std::string line, section;
     while (std::getline(in, line)) {
         size_t i = line.find_first_not_of(" \t");
         if (i == std::string::npos) continue;
         bool commented = line[i] == '#' || line[i] == ';';
+        if (!commented && line[i] == '[') {
+            size_t end = line.find(']', i + 1);
+            if (end != std::string::npos) section = line.substr(i + 1, end - i - 1);
+            continue;
+        }
         if (commented) i = line.find_first_not_of("#; \t", i);
         if (i == std::string::npos) continue;
 
@@ -261,7 +299,8 @@ static std::vector<std::string> shipped_ini_keys() {
         size_t sep = line.find_first_not_of(' ', i);
         if (sep == std::string::npos || line[sep] != '=') continue;
         if (commented && sep == i) continue;
-        keys.push_back(line.substr(start, i - start));
+        std::string key = line.substr(start, i - start);
+        keys.push_back(section.empty() ? key : section + "." + key);
     }
     return keys;
 }
@@ -299,6 +338,7 @@ int main() {
     test_retry_interval();
     test_config_rejects_malformed_and_unsafe_values();
     test_config_accepts_valid_boundaries();
+    test_config_requires_sections();
     test_shipped_ini_matches_the_settings_table();
     return finish("ini");
 }

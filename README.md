@@ -1,236 +1,281 @@
 # coreletd
 
-A MeshCore daemon for the [ClockworkPi uConsole](https://www.clockworkpi.com/uconsole) with the
+A [MeshCore](https://meshcore.co.uk) node for the
+[ClockworkPi uConsole](https://www.clockworkpi.com/uconsole) with the
 [HackerGadgets / OpenSourceSDRLab AIO v2](https://hackergadgets.com/products/uconsole-aio-v2)
-expansion board.
+expansion board — the firmware part, running as a Linux daemon.
 
-It drives the board's SX1262 directly over `spidev` + `libgpiod`, speaks the MeshCore mesh
-protocol, and exposes the **companion protocol over TCP** so the MeshCore phone/web app,
-[`meshcore-cli`](https://github.com/meshcore-dev/meshcore_py) and `meshtui` can connect — including
-from the uConsole itself over loopback.
+It drives the board's SX1262 LoRa transceiver directly, speaks the MeshCore mesh protocol, and
+offers the **companion protocol over TCP**, so the uConsole behaves like any other MeshCore radio:
+point the MeshCore phone or web app, [Corelet](https://github.com/singular0/corelet),
+[`meshcore-cli`](https://github.com/fdlamotte/meshcore-cli) or `meshtui` at it — from the uConsole
+itself over loopback, or from another machine on your network.
 
-Clean-room C++20. No Arduino shim, no PlatformIO, no RadioLib: `cmake && make`, one static binary,
-one systemd unit.
+One binary, one systemd unit, no Arduino layer underneath.
 
-## Status
+> ### Please read this before you put it on the air
+>
+> coreletd is an **independent, clean-room implementation** of the MeshCore protocol, written from
+> the public documentation. It is **not affiliated with, endorsed by, certified by or reviewed by
+> the MeshCore project**, and compatibility with real MeshCore firmware is an intention backed by
+> testing, not a guarantee anybody has signed off.
+>
+> A mesh is shared infrastructure. A bug here does not stay local: badly formed packets, traffic
+> that should never have been repeated, or a node that ignores the airtime budget affect everyone
+> in radio range, including people relying on that network. Try it on a mesh you own before joining
+> one you don't, and don't make it the node anything important depends on.
+>
+> The usual radio rules apply too, and the daemon cannot check them for you: transmit only on a
+> band and at a power your local regulations allow, keep within the duty cycle for that band, and
+> **fit an antenna before starting it** — a 22 dBm PA into an open connector will damage the radio.
 
-| Area | State |
-|------|-------|
-| Crypto (Ed25519 / X25519 / AES-ECB+HMAC) | Working, validated against a reference implementation |
-| Packet + payload codec | Working, validated against a reference implementation |
-| Advert send/receive, contact store | Working |
-| Direct messages, acks, retries, path learning | Working |
-| Channel (group) messages | Working |
-| Companion protocol over TCP | Working |
-| SX1262 driver | Working on real hardware (uConsole CM4 + AIO v2) |
-| Repeater / room server roles | Not implemented (out of scope) |
-| BLE and USB-serial companion transports | Not implemented (TCP only) |
+## What it does
 
-Validated on a uConsole (CM4, Debian trixie) with an AIO v2, against a LilyGo T-Echo running
-MeshCore v1.17.0 on 869.618 MHz:
+Unchecked boxes are not implemented — use different firmware for those.
 
-- adverts received and signature-verified (RSSI −41, SNR 12.2)
-- public channel messages sent and received by the T-Echo
-- direct encrypted messages both ways, decrypted correctly at each end
-- acks matched, confirming the ack-hash construction agrees with real firmware
-- meshcore-cli driving the daemon over TCP from another machine
+**Mesh**
 
-`--verbose` traces every SPI command and IRQ if you need to debug a different board.
+- [x] Adverts, sent and received, with signatures verified before anything is trusted.
+- [x] A contact store that survives restarts, with routes learned from the traffic it sees.
+- [x] Encrypted direct messages, with acknowledgements, retries and automatic fallback to flood
+      when a known route stops working.
+- [x] Channel (group) messages — the public channel, hashtag channels and private ones.
+- [x] Flood repeating for other nodes' traffic, off by default: repeating on a companion radio
+      spends your duty-cycle budget and your battery on other people's packets.
+- [x] Duty-cycle pacing, and a priority transmit queue so an ack is never stuck behind an advert.
+- [ ] Repeater and room-server roles. It is a companion node today; whether it grows into those is
+      undecided.
+- [ ] Telemetry, path tracing, and the room-server login commands.
 
-> **Note on `XOSC_START_ERR` (device error `0x0020`):** the SX1262 latches this at power-up because
-> it tries to start its oscillator before DIO3 is configured to drive the TCXO. It is cleared after
-> calibration and is not a fault. If it is still reported after that, `lora_tcxo` genuinely does not
-> match your board.
+**Clients**
 
-## Building
+- [x] The companion protocol over TCP, on loopback by default.
+- [x] One app at a time, as the protocol assumes. A new connection takes over from the old one, so
+      a client that died without closing its socket cannot lock you out.
+- [ ] A Unix domain socket, for clients on the uConsole itself.
+- Bluetooth LE and USB-serial are **not planned**. They are how you reach a microcontroller; this
+  runs on a Linux box that already has a network stack.
 
-On the uConsole (Raspberry Pi OS / Debian):
+Radio settings, node name and position come from the configuration file, and the daemon **refuses**
+the app's commands that would change them rather than accepting a change that nothing would persist.
+Edit the file and restart.
+
+**Operationally**
+
+- [x] Survives the radio disappearing: if the AIO v2's LoRa power rail is off, the daemon starts
+      anyway, waits for the chip, and picks it up when it appears. The same check reconnects if the
+      rail is cut mid-session.
+- [x] Crash-durable state — contacts, channels and your identity are written atomically.
+- [x] A Debian package with a systemd unit and udev rules.
+
+### Tested against real hardware
+
+Validated on a uConsole (CM4, Debian trixie) with an AIO v2, against a LilyGo T-Echo running stock
+MeshCore firmware on 869.618 MHz: adverts received and signature-verified, public-channel messages
+exchanged, encrypted direct messages decrypted correctly at both ends, and acks matched in both
+directions — which is the part that shows the two implementations really agree, since an ack is only
+sent by a node that decrypted the message.
+
+## What you need
+
+- A ClockworkPi uConsole with the AIO v2 expansion board, running Raspberry Pi OS or Debian
+  **trixie or newer** (older images ship libgpiod 1.6, and the build stops with an explanation).
+- An antenna for the band you intend to use.
+- A MeshCore client to talk to it, on the uConsole or on another machine.
+
+## Install
+
+Build the Debian package on the uConsole and install it:
+
+```sh
+sudo apt install build-essential debhelper cmake pkgconf libsodium-dev libssl-dev libgpiod-dev
+tools/build-deb.sh                                  # -> dist/coreletd_0.1.0_arm64.deb
+sudo apt install ./dist/coreletd_0.1.0_arm64.deb
+```
+
+Install the *file path*, with the leading `./`, so apt resolves the runtime dependencies.
+
+The package installs the daemon, its systemd unit and the udev rules, and creates a `coreletd`
+system user and group. It deliberately **does not start the service** — the frequency is a legal
+question and an unfitted antenna is a hardware one, so it waits for you. `/usr/share/doc/coreletd/`
+has the packaging notes, including why purging leaves your node identity alone.
+
+From a machine that isn't the uConsole, `tools/build-deb.sh --docker` builds the same arm64 package
+in a container. It runs emulated, so it is slow, but it works from anywhere with Docker.
+
+<details>
+<summary>Or build and install by hand</summary>
 
 ```sh
 sudo apt install build-essential cmake pkg-config libsodium-dev libssl-dev libgpiod-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j4
 ctest --test-dir build --output-on-failure
+
+sudo install -m 755 build/coreletd /usr/sbin/coreletd
+sudo install -D -m 644 etc/coreletd.ini /etc/coreletd/coreletd.ini
+sudo install -m 644 etc/coreletd.service /etc/systemd/system/
+sudo groupadd -f -r coreletd && sudo useradd -r -g coreletd -s /usr/sbin/nologin coreletd
+sudo install -m 644 etc/99-coreletd.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo systemctl daemon-reload
 ```
 
-`libgpiod` must be **2.0 or newer** (Debian trixie and Raspberry Pi OS 2025+ ship this; on older
-bookworm images you will get 1.6 and CMake will stop with an explanatory error).
+You get no man page and no upgrade path this way, and removing it is your problem.
 
-The SX1262 backend is built automatically on Linux. On macOS or any box without libgpiod it is
-skipped and only the mock radio is available, which is enough to develop and run the whole daemon.
+</details>
 
-### Debian package
+<details>
+<summary>Building without a uConsole</summary>
 
-Packaging lives in `debian/`, so on the uConsole you can build a `.deb` instead of installing by
-hand:
+The SX1262 backend is Linux-only and is skipped automatically on anything else, so a macOS or plain
+Linux checkout builds and tests the whole daemon against the mock radio. That is enough to develop
+against, and enough to run a client against a node that cannot transmit.
 
 ```sh
-sudo apt install build-essential debhelper cmake pkgconf libsodium-dev libssl-dev libgpiod-dev
-tools/build-deb.sh                  # -> dist/coreletd_0.1.0_arm64.deb
-sudo apt install ./dist/coreletd_0.1.0_arm64.deb
+brew install cmake libsodium openssl@3 pkgconf     # macOS
+cmake -S . -B build && cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
-From a non-Debian machine, `tools/build-deb.sh --docker` builds the same package for arm64 in a
-`debian:trixie` container (emulated, so expect it to be slow).
+OpenSSL is keg-only on Homebrew, so if CMake can't find `libcrypto`, point it at the right place:
+`export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig"`.
 
-The package installs the daemon, the udev rules and the systemd unit, and creates the `coreletd`
-user and `coreletd` group for you. It deliberately **does not enable or start the service** — the
-frequency is a legal question and an unfitted antenna is a hardware one, so review
-`/etc/coreletd/coreletd.ini` and then `systemctl enable --now coreletd`. Upgrades restart the
-daemon if you enabled it. `/usr/share/doc/coreletd/README.Debian` covers the rest, including why
-purging leaves your node identity in `/var/lib/coreletd` alone.
+</details>
 
-## Hardware setup
+## Set up the board
 
-The AIO v2 puts the SX1262 on **SPI1** with chip select on **SPI1-CE0 (GPIO18)**, DIO1 on
-**GPIO26**, BUSY on **GPIO24**, RESET on **GPIO25**. DIO2 drives the RF switch and DIO3 powers the
-TCXO at 1.8 V.
-
-**1. Enable SPI.** Add to `/boot/firmware/config.txt` and reboot:
+**1. Enable SPI.** The AIO v2 puts the SX1262 on SPI1. Add to `/boot/firmware/config.txt` and
+reboot:
 
 ```
 dtparam=spi=on
 dtoverlay=spi1-1cs
 ```
 
-Confirm `/dev/spidev1.0` exists afterwards.
+Confirm `/dev/spidev1.0` exists afterwards — the service refuses to start without it.
 
-**2. The LoRa power rail.** The AIO v2 gates power to each subsystem behind a GPIO. **GPIO16 must be
-driven high or the SX1262 is unpowered** and every SPI read returns zeroes — the single most likely
-cause of a "radio not responding" report. For reference the others are GPS=27, SDR=7, internal
-USB=23.
-
-The daemon does not switch the rail: it is shared board-level state, and whatever manages the
-uConsole's power owns it. On an AIO v2, use the board utility:
+**2. Turn on the LoRa power rail.** The AIO v2 gates power to each subsystem behind a GPIO, and
+**GPIO16 must be high or the SX1262 is unpowered**. This is far and away the most common cause of
+"the radio isn't responding". The daemon does not touch that switch: it is board-level state, owned
+by whatever manages the uConsole's power.
 
 ```sh
-aiov2_ctl lora on
+aiov2_ctl lora on                     # the AIO v2 board utility
+gpioset -c gpiochip0 16=1             # fallback; keep it running, the kernel reverts on exit
 ```
 
-If that utility is unavailable, `gpioset -c gpiochip0 16=1` is the manual fallback. The kernel
-reverts a GPIO to its default when the last process holding it exits, so keep `gpioset` running;
-libgpiod 2.x does that by default.
+For reference, the other rails are GPS=27, SDR=7, internal USB=23.
 
-Nothing breaks if you do it late. An SX1262 that does not answer is not a startup failure — the
-daemon comes up without a radio, retries every `lora_retry_interval` seconds (default 10), and
-starts receiving as soon as the chip appears. The same check runs while the radio is up, so cutting
-the rail mid-session logs a warning, holds the transmit queue, and reconnects once power is back.
+You can do this before or after starting the daemon. A radio that isn't answering yet is a normal
+state, not a failure.
 
-**3. Fit an antenna before transmitting.** Running a 22 dBm PA into an open connector will damage it.
+**3. Fit an antenna.** Before anything transmits.
 
-**4. Device access without root:**
+**4. If `meshtasticd` is installed, stop and disable it.** It holds the same GPIO lines, and
+coreletd will fail with `EBUSY`.
+
+## Configure
 
 ```sh
-sudo groupadd -f -r coreletd
-sudo install -m 644 etc/99-coreletd.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
-ls -l /dev/spidev1.0 /dev/gpiochip0     # -> crw-rw---- root coreletd
+sudoedit /etc/coreletd/coreletd.ini
 ```
 
-If `meshtasticd` is installed, stop and disable it — it will hold the same GPIO lines and the
-daemon will fail with `EBUSY`.
+**`lora_freq` is required and has no default.** Which band you may transmit on is a legal question,
+not a technical one, so the daemon refuses to start until you answer it — `869.618` for EU868,
+`910.525` for US915. Every node on a mesh must also agree on `lora_bw`, `lora_sf` and `lora_cr`; the
+shipped values are MeshCore's standard settings.
 
-## Configuring
+Worth setting while you are in there: `advert_name` (what other nodes see), `lat` / `lon` if you
+want to publish a position, and `duty_cycle` for your band. The file documents every option.
 
-```sh
-sudo install -D -m 644 etc/coreletd.ini /etc/coreletd/coreletd.ini
-sudo nano /etc/coreletd/coreletd.ini
-```
-
-`lora_freq` is **required and has no default** — which band you may transmit on is a legal question,
-not a technical one. Set the plan for your region (`869.618` for EU868, `910.525` for US915) and
-make sure every node on your mesh shares the same `lora_bw` / `lora_sf` / `lora_cr`.
-
-`etc/coreletd.ini` documents every option.
-
-## Running
+## Run
 
 ```sh
-# foreground, with the config in this repo
-./build/coreletd --config etc/coreletd.ini --verbose
-
-# as a service
-sudo install -m 755 build/coreletd /usr/sbin/coreletd
-sudo install -m 644 etc/coreletd.service /etc/systemd/system/
-sudo useradd -r -g coreletd -s /usr/sbin/nologin coreletd
-sudo systemctl daemon-reload && sudo systemctl enable --now coreletd
+sudo systemctl enable --now coreletd
 journalctl -u coreletd -f
 ```
 
-Then point a client at `127.0.0.1:5000`, e.g. `meshcore-cli -t 127.0.0.1:5000`.
-
-On first run the daemon generates an Ed25519 identity and writes it to
-`/var/lib/coreletd/identity` (mode 0600). **That file is your node** — back it up; deleting it
-gives you a new public key and every contact will see you as a stranger.
-
-### Security
-
-The companion protocol has **no authentication at all**. Anyone who can reach the port can read your
-messages and send as you, so `companion_bind` defaults to `127.0.0.1`. Only widen it to `0.0.0.0` on
-a network you control, ideally behind an SSH tunnel or WireGuard.
-
-### Running without hardware
-
-Set `mock_radio = 1` to bring the whole daemon up with a fake radio — transmissions are logged and
-discarded, and `mock_replay_file` replays a file of hex packets (one per line, `#` comments allowed)
-into the receive path. This is how the end-to-end test below works.
-
-## Layout
-
-```
-src/
-  util/       bytes, hex, INI, logging, clock
-  crypto/     Ed25519 (expanded-key), X25519, AES-128-ECB + HMAC, identity
-  proto/      packet header/path codec, payload codecs
-  radio/      Radio interface, duty cycle, mock radio, SX1262 (spidev + libgpiod)
-  mesh/       dispatcher (dedup, priority TX queue), contacts, channels, state writer, node
-  companion/  frame codec, TCP server, command session
-  daemon/     config, poll() event loop, wiring
-tests/        unit tests + generated reference vectors
-```
-
-Everything runs on a single thread in one `poll()` loop, so there is no locking anywhere in the
-codebase. Callbacks must not block.
-
-## Protocol notes
-
-Details that cost time to rediscover:
-
-- **The private key is not a normal Ed25519 key.** MeshCore stores the *expanded* 64-byte
-  SHA-512(seed) as `(a, RH)` and throws the seed away. No standard signing API accepts that, so
-  `crypto/identity.cpp` assembles signatures from libsodium's scalar primitives. libsodium's
-  clamping happens to match MeshCore's hand-rolled version exactly.
-- **The shared secret is raw X25519 output with no KDF.** The peer's Ed25519 key is converted
-  Edwards-Y → Montgomery-U, and the 32-byte ladder result *is* the key: AES-128 uses its first 16
-  bytes, the 2-byte MAC is HMAC-SHA256 over the ciphertext keyed with all 32.
-- **`path_length` is not a byte count.** Bits 0–5 are the hop count, bits 6–7 are `hash_size - 1`.
-- **Ack hashes cover the unpadded plaintext.** `SHA256(plaintext_without_trailing_zeros || pubkey)[:4]`,
-  where the key is the *sender's* — except for signed/room messages, where it is the recipient's.
-  Get the padding wrong and acks silently never match.
-- **Dedup must ignore the path**, since a packet's path mutates at every hop.
-- Adverts are only trusted after the signature verifies, and an advert whose timestamp is not newer
-  than the stored one is rejected as a replay.
-
-## Testing
+Or run it in the foreground while you are still setting things up — one at a time, since two
+daemons cannot share the radio:
 
 ```sh
-ctest --test-dir build --output-on-failure
+sudo systemctl stop coreletd
+sudo /usr/sbin/coreletd --config /etc/coreletd/coreletd.ini --verbose
 ```
 
-The crypto and codec tests run against frozen reference vectors produced by an independently
-written implementation of the same protocol — so agreement is real evidence of wire compatibility,
-not just self-consistency. The vectors are committed under `tests/`.
+Then point a client at the companion port:
 
-An end-to-end script drives a running daemon over the companion socket: it seeds a known identity,
-replays a signed advert and an encrypted message from a peer, and asserts that the contact appears,
-the message decrypts, and the ack hash matches the reference byte for byte.
+```sh
+meshcore-cli -t 127.0.0.1:5000
+corelet --host 127.0.0.1 --port 5000
+```
+
+### Options
+
+| Option | Meaning |
+|--------|---------|
+| `-c`, `--config <path>` | Configuration file. Default `/etc/coreletd/coreletd.ini`. |
+| `-v`, `--verbose` | Log at debug level, overriding the config. Repeat for trace, which reports every SPI command and interrupt. |
+| `-s`, `--syslog` | Drop timestamps from log lines, for running under systemd. |
+| `-V`, `--version` | Print the version. |
+| `-h`, `--help` | Usage summary. |
+
+`man coreletd` has the same reference when installed from the package.
+
+## Your node identity
+
+On first start the daemon generates an Ed25519 key and writes it to `/var/lib/coreletd/identity`.
+
+**That file is your node.** Back it up. Delete it and you get a new public key, which means every
+contact you have sees you as a stranger, and your old identity lingers in their contact list as a
+node that never speaks again. Purging the package leaves the file in place for exactly this reason.
+
+## Security
+
+The companion protocol has **no authentication of any kind**. Anyone who can reach the port can read
+your messages and send messages as you. `companion_bind` therefore defaults to `127.0.0.1`.
+
+Only widen it to `0.0.0.0` on a network you control, and preferably reach it over an SSH tunnel or
+WireGuard instead:
+
+```sh
+ssh -L 5000:127.0.0.1:5000 uconsole.local
+```
+
+## Trying it without a radio
+
+Set `mock_radio = 1` and the whole daemon comes up with a fake radio: transmissions are logged and
+discarded, and `mock_replay_file` feeds a file of hex packets (one per line, `#` comments allowed)
+into the receive path. Useful for exercising a client against a node that cannot transmit.
+
+## Troubleshooting
+
+**Every SPI read is zeroes / the radio never appears.** The LoRa rail is off — see step 2 above.
+
+**`XOSC_START_ERR`, device error `0x0020`, at startup.** Expected and harmless. The SX1262 latches
+it at power-up because it tries to start its oscillator before DIO3 is configured to power the TCXO;
+it is cleared after calibration. If it is *still* reported after that, `lora_tcxo` does not match
+your board.
+
+**The daemon starts but hears nothing.** Air settings must match the rest of the mesh exactly —
+frequency, bandwidth, spreading factor and coding rate. A mismatch is silence, not an error.
+
+**`EBUSY` opening the GPIO chip.** Something else holds the lines; usually `meshtasticd`, sometimes
+a `gpioset` you left running, sometimes an earlier coreletd that did not exit.
+
+**Permission denied on `/dev/spidev1.0`.** The udev rules aren't applied, or your user isn't in the
+`coreletd` group: `sudo adduser "$USER" coreletd`, then log out and back in.
+
+`--verbose --verbose` traces every SPI command and interrupt, which is where to start if you are
+adapting this to a different board.
 
 ## License
 
-GPL-3.0-or-later; see `LICENSE`.
+GPL-3.0-or-later. There is no warranty; see `LICENSE` for the exact terms.
 
 ## Credits
 
-Protocol documentation and constants come from
-[MeshCore](https://github.com/meshcore-dev/MeshCore) upstream. This is an independent
+Protocol documentation and constants come from the
+[MeshCore](https://github.com/meshcore-dev/MeshCore) project. coreletd is an independent
 implementation and is not affiliated with it.

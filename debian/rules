@@ -5,11 +5,20 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 %:
 	dh $@ --buildsystem=cmake
 
+# tools/build-deb.sh resolves the Git identity and leaves it here before copying
+# the source into a staging tree that has no .git of its own. Passing it through
+# is what keeps the compiled-in version, the changelog stanza and the package
+# filename on one observation. A plain dpkg-buildpackage in a checkout writes no
+# manifest and CMake resolves from Git itself instead, which is why git is a
+# build dependency.
+manifest = $(CURDIR)/.coreletd-version.cmake
+
 # The SX1262 backend is what the package exists for, so ask for it explicitly
 # rather than relying on the platform default: a missing libgpiod should fail
 # the build, not silently produce a mock-radio-only binary.
 override_dh_auto_configure:
 	dh_auto_configure -- \
+		$(if $(wildcard $(manifest)),-DCORELETD_VERSION_MANIFEST=$(manifest)) \
 		-DCORELETD_RADIO_SX1262=ON \
 		-DCORELETD_BUILD_TESTS=ON
 

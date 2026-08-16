@@ -1,4 +1,6 @@
-.TH CORELETD 8 "2026-08-12" "coreletd 0.1.0" "System Manager's Manual"
+.\" Installed by cmake --install and by the Debian package. The version is the
+.\" same frozen Git identity compiled into the daemon.
+.TH CORELETD 8 "August 2026" "coreletd @CORELETD_VERSION@" "System Manager's Manual"
 .SH NAME
 coreletd \- MeshCore daemon for the ClockworkPi uConsole with AIO v2
 .SH SYNOPSIS

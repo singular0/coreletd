@@ -8,6 +8,7 @@
 #include "daemon/app.h"
 #include "daemon/config.h"
 #include "util/log.h"
+#include "version.h"  // generated: CORELETD_VERSION, resolved from git
 
 namespace {
 

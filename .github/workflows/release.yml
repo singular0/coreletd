@@ -1,0 +1,150 @@
+name: release
+
+# Version tags only. The glob is the closest GitHub's filter syntax gets to
+# semver -- it cannot say "no leading zeros", let alone spell the prerelease
+# grammar -- so anything obviously not a version (`nightly`, `v2-wip`, a moving
+# `latest`) never starts a run, and the gate below re-checks what does against
+# the real thing. A tag that gets past the glob but fails that check is skipped
+# rather than failed: an unrecognised tag is not an error, it just is not a
+# release.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: check tag
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
+      # Debian maps SemVer prerelease punctuation into its own ordering syntax.
+      package: ${{ steps.check.outputs.package }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: check
+        run: |
+          tag=$GITHUB_REF_NAME
+          version=${tag#v}
+
+          # semver.org's published regex, with its named groups dropped.
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          semver+='(-((0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)'
+          semver+='(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?'
+          semver+='(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
+
+          if [[ ! $version =~ $semver ]]; then
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              echo "\`$tag\` is not a semver version tag; nothing built." \
+                  >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+          fi
+
+          # Ask the same resolver the package build calls. On a tag this must
+          # come back as the tag itself, minus the v; checking it here catches
+          # a checkout or ref problem -- a missing tag, an unreadable .git --
+          # before the package job does several minutes of work and produces
+          # something named after a version nobody asked for. The Debian form
+          # comes from the same answer, so the asset name is derived rather
+          # than guessed.
+          manifest=$(mktemp)
+          cmake -DSOURCE_DIR=. -DOUTPUT_MANIFEST="$manifest" -P cmake/version.cmake
+          resolved=$(sed -n 's/^set(CORELETD_VERSION "\(.*\)")$/\1/p' "$manifest")
+          package=$(sed -n 's/^set(CORELETD_VERSION_DEBIAN "\(.*\)")$/\1/p' "$manifest")
+          if [ "$resolved" != "$version" ] || [ -z "$package" ]; then
+              echo "::error::tag $tag resolved as '$resolved' (Debian '$package')"
+              exit 1
+          fi
+
+          # A prerelease is the -suffix only; build metadata after a + may
+          # contain a hyphen of its own and says nothing about stability.
+          prerelease=false
+          [[ ${version%%+*} == *-* ]] && prerelease=true
+
+          {
+              echo "release=true"
+              echo "version=$version"
+              echo "package=$package"
+              echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  # The same workflow that builds every pull request, called rather than
+  # copied, so a release cannot be built differently from what CI has been
+  # testing all along.
+  debian:
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    uses: ./.github/workflows/debian.yml
+
+  publish:
+    needs: [gate, debian]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coreletd-*
+          merge-multiple: true
+          path: dist
+
+      # The gate resolved the tag on its own runner; the package job built on
+      # another, from a checkout of its own. The asset carries its version in
+      # its name, so the tag can be checked against what was actually produced
+      # one step before the release exists.
+      - name: Check the package carries the tag's version
+        working-directory: dist
+        run: |
+          expected=coreletd_${{ needs.gate.outputs.package }}_arm64.deb
+          if [ ! -f "$expected" ]; then
+              echo "::error::$GITHUB_REF_NAME did not build as itself: no $expected"
+              ls -1
+              exit 1
+          fi
+
+      # Nothing here is signed with a key anyone can check against, so the
+      # checksums are the only way a download can be verified at all. The
+      # -dbgsym package stays out of the release -- it is for debugging a build
+      # you already have, and it would double the asset list on the page people
+      # come to for one file. Both globs below rely on the underscore:
+      # coreletd-dbgsym_ does not match coreletd_.
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum coreletd_*.deb | tee SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: coreletd ${{ needs.gate.outputs.version }}
+          prerelease: ${{ needs.gate.outputs.prerelease }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          files: |
+            dist/coreletd_*.deb
+            dist/SHA256SUMS
+          body: |
+            ## Install
+
+            For the ClockworkPi uConsole with the AIO v2 board, on Debian
+            trixie or newer -- older images ship libgpiod 1.6, which this will
+            not run against. Install the file path, with the leading `./`, so
+            apt pulls the runtime dependencies in rather than going looking for
+            a package by that name:
+
+                sudo apt install ./coreletd_${{ needs.gate.outputs.package }}_arm64.deb
+
+            Nothing here is signed, so `SHA256SUMS` is the only way to check
+            what you downloaded.
+
+            Installing does not start the daemon: the frequency is a legal
+            question and a 22 dBm PA into an unfitted antenna is a hardware
+            one. Set `lora_freq` for your region in
+            `/etc/coreletd/coreletd.ini`, fit an antenna, then
+
+                sudo systemctl enable --now coreletd

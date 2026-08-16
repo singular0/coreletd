@@ -31,7 +31,8 @@ work. `CORELETD_HAVE_SX1262` guards the code that needs the real backend.
 
 Sources are listed explicitly in `CMakeLists.txt`; a new `.cpp` must be added there or it silently
 won't compile. Tests are one CTest binary per `tests/test_<name>.cpp`, registered by the `foreach`
-in the same file — a new test file needs its name added to that list.
+in the same file — a new test file needs its name added to that list. The `version` test is the
+exception: a CMake script, registered beside them, that exercises the resolver described below.
 
 ## Architecture
 
@@ -179,15 +180,69 @@ against a LilyGo T-Echo on MeshCore v1.17.0, 869.618 MHz — adverts signature-v
 SNR 12.2), public-channel messages both ways, direct messages decrypted at each end, and acks
 matched, which is what confirms the ack-hash construction agrees with real firmware.
 
+## Versioning
+
+There is no version number written down anywhere. `cmake/version.cmake` resolves one from Git —
+the same resolver Corelet uses, ported with a `CORELETD_` prefix and without the macOS bundle
+fields — and every consumer takes it from there:
+
+- **`CORELETD_VERSION`** (`1.2.3`, `1.2.3-4-gabc1234`, `0.0.0-gabc1234-dirty`) becomes the generated
+  `version.h` that `main.cpp` and `app.cpp` include, so it is what `--version` prints and what the
+  companion protocol reports as firmware version and build.
+- **`CORELETD_VERSION_DEBIAN`** is the same identity in Debian's grammar: a prerelease hyphen
+  becomes `~` so `0.2.0~rc.1` sorts *before* `0.2.0`, and everything after a tag becomes `+N.ghash`.
+  It names the `.deb` and fills its changelog stanza.
+- **`CORELETD_VERSION_DATE`** signs that generated stanza with the commit's own date, so the same
+  commit always produces the same package.
+
+Only tags matching SemVer with a `v` prefix count as releases; `nightly` or a tag-shaped typo is
+ignored rather than mistaken for the newest release. Anything with no release tag behind it resolves
+to `0.0.0+g<hash>`, which is the honest answer for an untagged build and the reason the repository's
+first real package needs a `v0.1.0` tag.
+
+A `.git` that exists but cannot be read is **fatal**, never `0.0.0` — that failure is what put
+0.0.0 binaries inside Corelet's tagged v0.1.0 debs. `tests/version_test.cmake` (CTest `version`)
+covers all of this against throwaway repositories, which is why `git` is a build dependency.
+
+CMake resolves the version at configure time and again before every build, so an already-configured
+tree still reports the commit it was built from. Packaging can't do that — it builds from a staged
+copy with no `.git` — so `build-deb.sh` freezes the answer into a manifest and passes it in with
+`-DCORELETD_VERSION_MANIFEST`; `debian/rules` uses it when it is there. The man page is generated
+from `etc/coreletd.8.in` by the same resolver and installed by CMake, so its `.TH` line cannot drift
+from the binary next to it.
+
 ## Packaging
 
 `debian/` packages the tree for `linux-any`; `tools/build-deb.sh` wraps `dpkg-buildpackage` and
 drops the result in `dist/`, with `--docker [arch]` running the same build inside a `debian:trixie`
 container for building from a Mac (emulated, so slow — it is for a one-off, not a routine).
 
-`debian/control`'s Build-Depends are authoritative, but the list is *copied* in two places that
-apt cannot read for itself: `build_deps` in `build-deb.sh`, which the container installs before
-building, and the `apt install` line in the README. Changing a dependency means changing all three.
+Every build goes through a temporary staged copy, because that is where the frozen manifest and the
+generated changelog stanza are injected; nothing is written into the working copy. The container
+build resolves Git against the read-only mount of the real checkout and hands the manifest to the
+same staged path, so a container package identifies itself exactly as a native one does. The last
+step asks `dpkg-deb` what version it actually built and fails if it isn't the one the manifest
+named.
+
+`debian/control`'s Build-Depends is the only copy of the build dependency list: `build-deb.sh deps`
+installs them with `apt-get build-dep` on the tree itself, and the container build and CI both call
+that rather than repeating the list. The one deliberate exception is the README's "build by hand"
+section, which lists what a plain CMake build needs — a different, shorter list, since debhelper
+isn't in it.
+
+CI is two workflows. `debian.yml` builds the package on GitHub's free arm64 runner in a
+`debian:trixie` container, on pull requests and on demand — a native build, because debhelper skips
+`dh_auto_test` when the host architecture differs from the build one, so a cross-built package would
+ship untested. There is no amd64 package: without an AIO v2 under it the binary has no radio.
+`release.yml` triggers on `v*` tags, *calls* `debian.yml` rather than repeating it, and publishes the
+`.deb` with a `SHA256SUMS` (the `-dbgsym` package is built but deliberately left out of the release).
+
+Its gate job runs the version resolver against the tagged checkout and stops the release unless the
+tag resolves to itself — an unreadable `.git` or a missing tag would otherwise be discovered as a
+release full of `0.0.0` assets. The Debian spelling of the asset name comes out of the same answer,
+and is checked against the file the package job actually produced. A tag that isn't a version at all
+is skipped rather than failed. Both jobs check out with `fetch-depth: 0`: a shallow clone has no
+tags, so `git describe` would find nothing.
 
 `debian/rules` forces `-DCORELETD_RADIO_SX1262=ON` rather than trusting the platform default: the
 package exists for that backend, so a missing libgpiod must fail the build instead of quietly

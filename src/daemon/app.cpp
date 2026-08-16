@@ -7,6 +7,7 @@
 #include "util/clock.h"
 #include "util/hex.h"
 #include "util/log.h"
+#include "version.h"  // generated: CORELETD_VERSION, resolved from git
 
 #if CORELETD_HAVE_SX1262
 #include "radio/sx1262.h"

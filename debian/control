@@ -2,8 +2,12 @@ Source: coreletd
 Section: comm
 Priority: optional
 Maintainer: Denis Yantarev <denis.yantarev@gmail.com>
+# git is a build dependency because the version comes from the checkout: a
+# build with no manifest frozen for it resolves the identity itself, and the
+# version test builds throwaway repositories to check what that resolves to.
 Build-Depends: debhelper-compat (= 13),
                cmake (>= 3.16),
+               git,
                pkgconf,
                libsodium-dev,
                libssl-dev,

@@ -1,0 +1,73 @@
+name: debian
+
+# The .deb is what people install, so it is what CI builds -- and building it
+# runs the test suite on the way through, since debhelper's cmake buildsystem
+# calls ctest.
+#
+# release.yml calls this workflow rather than copying it, so a tag is packaged
+# by exactly the path every pull request has been exercising. Nothing
+# tag-shaped is triggered from this file for that reason.
+#
+# There is no push trigger either: packaging takes minutes and most commits
+# land straight on main, so the answer would arrive after the fact. Open a pull
+# request, or dispatch this by hand, when you want packaging exercised before a
+# tag.
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # arm64 only. The daemon exists to drive an AIO v2 board on a uConsole, and
+  # nothing else is going to have one plugged in; an amd64 package would be a
+  # binary with no radio under it.
+  #
+  # The build is native, on GitHub's arm64 runner -- free for public
+  # repositories, which is what makes that affordable. Cross-compiling would be
+  # quicker, but debhelper skips dh_auto_test whenever the host architecture
+  # differs from the build one, so a cross-built package would ship with its
+  # tests never run, and qemu would turn a few minutes into most of an hour.
+  package:
+    name: arm64
+    runs-on: ubuntu-24.04-arm
+    # The package targets Debian trixie: it is what the uConsole runs, and the
+    # oldest release carrying the libgpiod 2 the radio backend requires. The
+    # runner's own distribution supplies only the kernel and the CPU.
+    container: debian:trixie
+    steps:
+      # A stock Debian image has no git, and checkout silently falls back to
+      # downloading a tarball over the REST API when it cannot find one.
+      # ca-certificates is only a Recommends of git, so --no-install-recommends
+      # would leave the image with no CA bundle at all and the clone would die
+      # on "Problem with the SSL CA cert" -- apt itself is unaffected, its own
+      # sources are plain http.
+      - name: Install git
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      # Whole history and every tag: the package takes its version from git
+      # describe, and checkout's default shallow clone has no tag to find, so
+      # even a build of the release commit would come out as 0.0.0+g<hash>.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: ./tools/build-deb.sh deps
+
+      # dpkg-buildpackage compiles serially unless told otherwise, which leaves
+      # three of the runner's four cores idle.
+      - name: Build package
+        run: |
+          export DEB_BUILD_OPTIONS="parallel=$(nproc)"
+          ./tools/build-deb.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coreletd-deb-arm64
+          path: dist/*.deb
+          if-no-files-found: error

@@ -85,15 +85,27 @@ sent by a node that decrypted the message.
 
 ## Install
 
-Build the Debian package on the uConsole and install it:
+Download the arm64 `.deb` from [Releases](../../releases) onto the uConsole and install it:
 
 ```sh
-sudo apt install build-essential debhelper cmake pkgconf libsodium-dev libssl-dev libgpiod-dev
-tools/build-deb.sh                                  # -> dist/coreletd_0.1.0_arm64.deb
-sudo apt install ./dist/coreletd_0.1.0_arm64.deb
+sudo apt install ./coreletd_0.1.0_arm64.deb
 ```
 
-Install the *file path*, with the leading `./`, so apt resolves the runtime dependencies.
+Install the *file path*, with the leading `./`, so apt resolves the runtime dependencies. Nothing is
+signed, so the `SHA256SUMS` published beside the package is the only way to check what you got.
+
+Or build the package yourself, on the uConsole:
+
+```sh
+tools/build-deb.sh deps                             # build dependencies, once
+tools/build-deb.sh                                  # -> dist/coreletd_<version>_arm64.deb
+sudo apt install ./dist/coreletd_*_arm64.deb
+```
+
+A package built from a checkout is named after the commit it came from, so it is a release version
+only when you are on a release tag; anything else builds as `0.0.0+g<hash>`, which `coreletd
+--version` then reports too. That is deliberate — a build should not claim to be a release nobody
+made.
 
 The package installs the daemon, its systemd unit and the udev rules, and creates a `coreletd`
 system user and group. It deliberately **does not start the service** — the frequency is a legal

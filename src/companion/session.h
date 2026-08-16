@@ -37,6 +37,9 @@ private:
     void handle_frame(ByteView frame);
     void reply(ByteView payload) { server_.send(payload); }
     void reply_err(uint8_t code) { server_.send(resp_err(code)); }
+    // Every unsolicited frame goes out through here rather than reply(), so the
+    // gate below is one place rather than a rule each push has to remember.
+    void push(ByteView payload);
 
     // Command handlers. Each returns the reply frame to send.
     Bytes cmd_app_start(ByteView args);
@@ -73,8 +76,10 @@ private:
     mesh::StateWriter& state_;
     const DeviceMetrics& metrics_;
 
-    // Set once the app has sent CMD_APP_START. Commands before that are still
-    // answered — some clients probe with DEVICE_QUERY first.
+    // Set once the app has sent CMD_APP_START, and cleared for each new
+    // connection. Commands before that are still answered — some clients probe
+    // with DEVICE_QUERY first — but pushes are not sent, because a client that
+    // has not identified itself has not asked for them. See push().
     bool app_started_ = false;
     std::string app_name_;
     // Round-trip timing for PUSH_CODE_SEND_CONFIRMED. Empty until something has

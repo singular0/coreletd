@@ -122,6 +122,20 @@ public:
         return {};
     }
 
+    // The codes of whatever the daemon has written so far, in order. await()
+    // waits for a frame to turn up and so cannot show that none did; this can.
+    std::vector<uint8_t> drained() {
+        run_for(app_, 1);
+        drain(5);
+        std::vector<uint8_t> codes;
+        for (;;) {
+            auto frame = reader_.next();
+            if (!frame) break;
+            if (!frame->empty()) codes.push_back((*frame)[0]);
+        }
+        return codes;
+    }
+
 private:
     // Reads whatever the daemon has already written. The wait is real
     // milliseconds and only a backstop: replies are produced synchronously
@@ -258,6 +272,59 @@ static void test_companion_app_round_trip() {
     CHECK(elapsed < 5100);
 }
 
+// A client that connects and probes is answered, but is not sent the mesh
+// traffic it never asked for. Pushes start at CMD_APP_START and not before.
+static void test_pushes_wait_for_app_start() {
+    const std::string dir = fresh_state_dir("pushgate");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+
+    ManualClock clock;
+    auto radio = std::make_unique<GatedRadio>();
+    GatedRadio* air = radio.get();
+    App app(std::move(cfg), std::move(radio), clock);
+    CHECK(app.start());
+    air->set_ready(true);
+
+    Client client(app);
+    CHECK(client.connected());
+    if (!client.connected()) return;
+
+    // The probe a client makes before deciding to speak the protocol.
+    client.send(Bytes {kCmdDeviceQuery});
+    CHECK(!client.await(kRespDeviceInfo).empty());
+
+    // Everything a busy mesh would produce: a new contact, a message stored for
+    // collection, and two raw frames — the second a duplicate, which on_raw_rx
+    // forwards as well.
+    air->inject(from_hex(pv::kAdvertPacket));
+    air->inject(from_hex(pv::kTextPacket));
+    air->inject(from_hex(pv::kTextPacket));
+
+    // Not "no LOG_RX_DATA" but nothing at all: no ADVERT, no NEW_ADVERT, no
+    // MSG_WAITING. The client asked one question and got one answer.
+    CHECK(client.drained().empty());
+
+    Bytes start {kCmdAppStart, 0, 0, 0, 0, 0, 0, 0};
+    put_str(start, "test");
+    client.send(start);
+    CHECK(!client.await(kRespSelfInfo).empty());
+
+    // The message that arrived before the app identified itself is still in the
+    // inbox, and starting the app is what tells it so — the push at the time was
+    // dropped, and nothing else would have mentioned it.
+    CHECK(!client.await(kPushMsgWaiting).empty());
+
+    // From here the feed is live, duplicates included: this is the third copy of
+    // a packet the dispatcher has already deduplicated twice.
+    air->inject(from_hex(pv::kTextPacket));
+    Bytes logged = client.await(kPushLogRxData);
+    CHECK(!logged.empty());
+    if (logged.size() < 3) return;
+    // Code, then SNR in quarter-dB and RSSI, then the frame exactly as received.
+    CHECK_BYTES(subview(logged, 3), from_hex(pv::kTextPacket));
+}
+
 // The seam must not change what the daemon does on its own: handed no radio, it
 // still builds the one the config asks for, and still generates an identity on
 // a first run.
@@ -278,6 +345,7 @@ int main() {
 
     test_received_text_is_acked_on_air();
     test_companion_app_round_trip();
+    test_pushes_wait_for_app_start();
     test_app_builds_its_own_radio();
 
     return finish("app");

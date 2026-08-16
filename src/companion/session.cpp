@@ -81,7 +81,14 @@ void Session::handle_frame(ByteView frame) {
 
     Bytes out;
     switch (cmd) {
-        case kCmdAppStart: out = cmd_app_start(args); break;
+        case kCmdAppStart:
+            // SELF_INFO first, then the inbox. Anything that arrived before the
+            // app identified itself had its PUSH_MSG_WAITING dropped by the
+            // gate, so without this the app would not learn of waiting messages
+            // until the next one came in.
+            reply(cmd_app_start(args));
+            if (node_.has_messages()) push(Bytes {kPushMsgWaiting});
+            return;
         case kCmdDeviceQuery: out = cmd_device_query(args); break;
         case kCmdGetDeviceTime: {
             out = Bytes {kRespCurrTime};
@@ -492,34 +499,51 @@ Bytes Session::cmd_set_radio_params(ByteView args) {
 // Pushes
 // ---------------------------------------------------------------------------
 
+// Commands are answered to whoever is connected; pushes are not. Nothing here
+// was requested by the client — these are mesh events that happen whether or not
+// anyone is listening — so they go only to a client that said CMD_APP_START and
+// thereby asked for a session.
+//
+// on_raw_rx is why this matters rather than merely being tidy: it forwards every
+// packet the radio decodes, duplicates included, at up to kMaxPacketSize plus
+// framing apiece. A client that connected to probe with DEVICE_QUERY and is not
+// draining its socket reaches Server's outbound limit in about a thousand
+// packets and gets disconnected for traffic it never asked for.
+void Session::push(ByteView payload) {
+    if (!app_started_) return;
+    server_.send(payload);
+}
+
 void Session::on_advert_seen(const mesh::Contact& c) {
     Bytes out {kPushAdvert};
     put_bytes(out, c.pubkey);
-    reply(out);
+    push(out);
 }
 
 void Session::on_contact_changed(const mesh::Contact& c, bool is_new) {
     if (is_new) {
         Bytes out {kPushNewAdvert};
         put_bytes(out, c.pubkey);
-        reply(out);
+        push(out);
     }
+    // Outside the gate: the contact changed regardless of who is listening, and
+    // losing it because no app had started would be the bug from item 4 again.
     state_.request_save();
 }
 
 void Session::on_path_updated(const mesh::Contact& c) {
     Bytes out {kPushPathUpdated};
     put_bytes(out, c.pubkey);
-    reply(out);
+    push(out);
 }
 
-void Session::on_message_stored() { reply(Bytes {kPushMsgWaiting}); }
+void Session::on_message_stored() { push(Bytes {kPushMsgWaiting}); }
 
 void Session::on_ack(ByteView ack_hash) {
     Bytes out {kPushSendConfirmed};
     put_bytes(out, ack_hash);
     put_u32(out, last_send_ms_ ? clock_.now_ms() - *last_send_ms_ : 0);
-    reply(out);
+    push(out);
 }
 
 void Session::on_raw_rx(const proto::Packet& p, ByteView raw) {
@@ -529,7 +553,7 @@ void Session::on_raw_rx(const proto::Packet& p, ByteView raw) {
     out.push_back(static_cast<uint8_t>(static_cast<int8_t>(std::clamp(p.snr * 4.0f, -128.0f, 127.0f))));
     out.push_back(static_cast<uint8_t>(static_cast<int8_t>(std::clamp(p.rssi, -128, 127))));
     put_bytes(out, raw);
-    reply(out);
+    push(out);
 }
 
 }  // namespace clt::companion

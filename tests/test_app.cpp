@@ -5,12 +5,12 @@
 // sender, stores, companion session — is wired by App exactly as `main()` gets
 // it, which is the point: nothing here constructs a subsystem.
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -33,11 +33,6 @@ namespace pv = clt::pktvec;
 
 namespace {
 
-// The companion port the harness binds. Fixed rather than ephemeral because the
-// client has to connect to it, and App deliberately does not hand out its
-// Server.
-constexpr uint16_t kPort = 45879;
-
 // One state directory per test, emptied first so that what a previous run left
 // behind cannot make a test pass.
 std::string fresh_state_dir(const char* name) {
@@ -51,7 +46,7 @@ std::string fresh_state_dir(const char* name) {
 Config harness_config(const std::string& state_dir) {
     Config cfg;
     cfg.state_dir = state_dir;
-    cfg.companion.port = kPort;
+    cfg.companion.socket_path = state_dir + "/companion.sock";
     cfg.finalise();
     return cfg;
 }
@@ -72,18 +67,22 @@ void run_for(App& app, uint32_t ms) {
     app.loop().run();
 }
 
-// A companion app on the other end of the TCP socket: sends command frames and
-// picks replies out of the stream by response code, which is what a real client
-// does too — advisory pushes for the traffic under test share that stream.
+// A companion app on the other end of the default Unix socket: sends command
+// frames and picks replies out of the stream by response code, which is what a
+// real client does too — advisory pushes for the traffic under test share it.
 class Client {
 public:
-    explicit Client(App& app) : app_(app) {
-        fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    Client(App& app, const std::string& socket_path) : app_(app) {
+        fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd_ < 0) return;
-        sockaddr_in addr {};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(kPort);
-        ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        sockaddr_un addr {};
+        addr.sun_family = AF_UNIX;
+        if (socket_path.size() >= sizeof(addr.sun_path)) {
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+        memcpy(addr.sun_path, socket_path.c_str(), socket_path.size() + 1);
         if (::connect(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
             ::close(fd_);
             fd_ = -1;
@@ -204,12 +203,14 @@ static void test_received_text_is_acked_on_air() {
     if (a) CHECK(a->name == pv::kNameA);
 }
 
-// What the external e2e script does, in-process: a client connects over TCP,
-// starts a session, sends a message and sees it confirmed.
+// The external-client round trip, in-process: a client connects over the
+// default Unix transport, starts a session, sends a message and sees it
+// confirmed.
 static void test_companion_app_round_trip() {
     const std::string dir = fresh_state_dir("companion");
     Config cfg = harness_config(dir);
     CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string socket_path = cfg.companion.socket_path;
 
     ManualClock clock;
     auto radio = std::make_unique<GatedRadio>();
@@ -218,7 +219,7 @@ static void test_companion_app_round_trip() {
     CHECK(app.start());
     air->set_ready(true);
 
-    Client client(app);
+    Client client(app, socket_path);
     CHECK(client.connected());
     if (!client.connected()) return;
 
@@ -278,6 +279,7 @@ static void test_pushes_wait_for_app_start() {
     const std::string dir = fresh_state_dir("pushgate");
     Config cfg = harness_config(dir);
     CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string socket_path = cfg.companion.socket_path;
 
     ManualClock clock;
     auto radio = std::make_unique<GatedRadio>();
@@ -286,7 +288,7 @@ static void test_pushes_wait_for_app_start() {
     CHECK(app.start());
     air->set_ready(true);
 
-    Client client(app);
+    Client client(app, socket_path);
     CHECK(client.connected());
     if (!client.connected()) return;
 

@@ -195,7 +195,7 @@ Bytes Session::cmd_device_query(ByteView args) {
     Bytes out {kRespDeviceInfo, kFirmwareVersion};
     out.push_back(info.max_contacts_div2);
     out.push_back(info.max_channels);
-    put_u32(out, 0);  // BLE pin, not applicable over TCP
+    put_u32(out, 0);  // BLE pin, not applicable to either stream transport
     put_padded(out, to_bytes(info.firmware_build), 12);
     put_padded(out, to_bytes(info.model), 40);
     put_padded(out, to_bytes(info.version), 20);

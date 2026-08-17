@@ -24,12 +24,12 @@ Description: MeshCore daemon for the ClockworkPi uConsole with AIO v2
  coreletd drives the SX1262 LoRa transceiver on the HackerGadgets /
  OpenSourceSDRLab AIO v2 expansion board directly over spidev and libgpiod,
  speaks the MeshCore mesh protocol, and exposes the companion protocol over
- TCP so the MeshCore phone/web app, meshcore-cli and meshtui can connect --
- including from the uConsole itself over loopback.
+ a local Unix socket or optional TCP so compatible MeshCore apps,
+ meshcore-cli and meshtui can connect.
  .
  It handles adverts and contacts, encrypted direct messages with acks,
  retries and path learning, and channel (group) messages. Repeater and room
- server roles are not implemented, and TCP is the only companion transport.
+ server roles are not implemented.
  .
  This is a clean-room C++20 implementation, not affiliated with MeshCore
  upstream. It needs a frequency configured for your region and an antenna

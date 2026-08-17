@@ -129,6 +129,7 @@ Setting Real(std::string_view key, double& field, bool (*valid)(double),
 // fixed-point pair. load() converts both once the table has been read.
 struct Raw {
     std::string log_level = "info";
+    std::string companion_interface = "unix";
     double lat = 0.0;
     double lon = 0.0;
 };
@@ -186,6 +187,8 @@ std::vector<Setting> settings(Config& cfg, Raw& raw) {
         Int("node.max_hops", cfg.node.max_hops, 0, proto::kMaxPathSize),
 
         // --- companion ---
+        Str("companion.companion_interface", raw.companion_interface),
+        Str("companion.companion_socket", cfg.companion.socket_path),
         Str("companion.companion_bind", cfg.companion.bind_addr),
         Int("companion.companion_port", cfg.companion.port, 1, kMaxU16),
 
@@ -260,6 +263,15 @@ bool Config::load(const std::string& path, std::string& error) {
 
     if (!log_parse_level(raw.log_level, log_level)) {
         error = "logging.log_level: unknown level \"" + raw.log_level + "\"";
+        return false;
+    }
+
+    if (raw.companion_interface == "unix") {
+        companion.transport = clt::companion::Server::Transport::Unix;
+    } else if (raw.companion_interface == "tcp") {
+        companion.transport = clt::companion::Server::Transport::Tcp;
+    } else {
+        error = "companion.companion_interface must be \"unix\" or \"tcp\"";
         return false;
     }
 

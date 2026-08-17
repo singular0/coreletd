@@ -133,8 +133,11 @@ void App::log_status() {
     LOG_INFO("  node      : %s \"%s\"", hex_prefix(identity_->pub()).c_str(),
              cfg_.node.name.c_str());
     LOG_INFO("  radio     : %s", radio_->describe().c_str());
-    LOG_INFO("  companion : tcp://%s:%u", cfg_.companion.bind_addr.c_str(),
-             cfg_.companion.port);
+    if (cfg_.companion.transport == companion::Server::Transport::Unix)
+        LOG_INFO("  companion : unix://%s", cfg_.companion.socket_path.c_str());
+    else
+        LOG_INFO("  companion : tcp://%s:%u", cfg_.companion.bind_addr.c_str(),
+                 cfg_.companion.port);
     LOG_INFO("  state     : %s", cfg_.state_dir.c_str());
     LOG_INFO("  contacts  : %zu", contacts_->size());
 

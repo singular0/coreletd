@@ -12,13 +12,18 @@ namespace clt::companion {
 // Overflow-safe capacity check shared with the transport regression tests.
 bool outbound_buffer_has_capacity(size_t buffered, size_t next, size_t limit);
 
-// TCP transport for the companion protocol. The firmware model is a single
+// Stream transport for the companion protocol. The firmware model is a single
 // connected app, so a new connection replaces the old one rather than being
-// refused — otherwise a crashed client would lock everyone out until the TCP
-// timeout expired.
+// refused — otherwise a crashed client would lock everyone out indefinitely.
 class Server {
 public:
+    enum class Transport { Unix, Tcp };
+
     struct Options {
+        // A local, group-accessible socket is the safe default: the companion
+        // protocol itself has no authentication.
+        Transport transport = Transport::Unix;
+        std::string socket_path = "/run/coreletd/companion.sock";
         std::string bind_addr = "127.0.0.1";
         uint16_t port = 5000;
         // A client that cannot drain this much queued output is disconnected.
@@ -47,6 +52,9 @@ public:
     const Options& options() const { return opts_; }
 
 private:
+    bool start_unix(std::string& error);
+    bool start_tcp(std::string& error);
+    void cleanup_unix_path();
     void on_listen_ready(short revents);
     void on_client_ready(short revents);
     void accept_client();
@@ -58,6 +66,14 @@ private:
 
     int listen_fd_ = -1;
     int client_fd_ = -1;
+    // Held for the listener lifetime. It prevents another coreletd from
+    // mistaking this live endpoint for a stale filesystem socket and unlinking
+    // it before bind(). The sidecar stays in place between runs so locking has
+    // one stable inode.
+    int unix_lock_fd_ = -1;
+    bool owns_unix_path_ = false;
+    uint64_t unix_path_dev_ = 0;
+    uint64_t unix_path_ino_ = 0;
     // Dropped before the matching fd is closed, so poll() never sees a
     // descriptor that has since been handed to something else.
     EventLoop::FdWatch listen_watch_;

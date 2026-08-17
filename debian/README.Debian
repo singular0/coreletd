@@ -67,9 +67,14 @@ to discard the node identity:
 Companion protocol access
 -------------------------
 
-The companion protocol has no authentication at all -- anyone who can reach
-the port can read your messages and send as you. `companion_bind` in
-`[companion]` therefore defaults to 127.0.0.1. Only widen it on a network you
-control, ideally behind an SSH tunnel or WireGuard.
+The companion protocol has no authentication at all. It therefore defaults to
+/run/coreletd/companion.sock, owned by coreletd:coreletd with mode 0660. Add a
+local client's user to the coreletd group, then log out and back in:
+
+    sudo adduser "$USER" coreletd
+
+Set `companion_interface = tcp` for TCP-only clients. Selecting TCP is the
+explicit network opt-in; it defaults to 127.0.0.1. Prefer an SSH tunnel or
+WireGuard to widening `companion_bind` for direct network exposure.
 
  -- Denis Yantarev <denis.yantarev@gmail.com>, Wed, 12 Aug 2026 14:40:00 +0000

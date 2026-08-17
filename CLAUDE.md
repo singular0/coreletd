@@ -46,7 +46,7 @@ src/
   proto/      packet header/path codec, payload codecs
   radio/      Radio interface, duty cycle, SX1262 (spidev + libgpiod)
   mesh/       dispatcher, contacts, channels, sender, inbox, node, state writer
-  companion/  frame codec, TCP server, command session
+  companion/  frame codec, Unix/TCP stream server, command session
   daemon/     config, event loop, host metrics, App wiring
 tests/        unit tests + frozen reference vectors
 ```
@@ -114,10 +114,10 @@ mirrors them in its `protocol/protocol.h`). Never renumber; append only.
   be disconnected for traffic it never asked for.
 - **One client at a time.** A new connection replaces the current one (`Server::accept_client`), so
   a client that died without closing cannot lock the port.
-- **TCP is the transport, and a Unix domain socket is the only other one wanted** — a local client
-  should not have to go through the loopback interface. BLE and USB-serial are deliberately not on
-  the list: they exist because a microcontroller has no network stack, and this is a Linux daemon.
-  Don't add them, and don't restructure `Server` in anticipation of them.
+- **A Unix domain socket is the default transport; TCP is the compatibility option.** Selecting
+  TCP is the explicit network opt-in, with a loopback bind as its default. BLE and USB-serial are
+  deliberately not on the list: they exist because a microcontroller has no network stack, and
+  this is a Linux daemon. Don't add them, and don't restructure `Server` in anticipation of them.
 - **`SYNC_NEXT_MESSAGE` pops.** The daemon is not message storage; whatever the app collects, the
   app must persist or the message is gone.
 - **Settings the config file owns are refused, not silently accepted.** `SET_ADVERT_NAME`,

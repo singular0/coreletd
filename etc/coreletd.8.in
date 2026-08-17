@@ -12,14 +12,15 @@ drives the SX1262 LoRa transceiver on the HackerGadgets / OpenSourceSDRLab
 AIO v2 expansion board over
 .BR spidev (4)
 and libgpiod, speaks the MeshCore mesh protocol, and exposes the MeshCore
-companion protocol over TCP so that the phone or web app,
+companion protocol over a local Unix-domain socket, or optionally TCP, so that
+compatible apps,
 .BR meshcore-cli (1)
 and meshtui can connect \(em including from the uConsole itself over loopback.
 .PP
 It sends and receives adverts, maintains a contact store, carries encrypted
 direct messages with acknowledgements, retries and path learning, and relays
 channel (group) messages. Repeater and room server roles are not implemented,
-and TCP is the only companion transport.
+and only one companion client is active at a time.
 .PP
 Everything runs on a single thread in one
 .BR poll (2)
@@ -65,6 +66,22 @@ and
 .BR lora_cr .
 The installed configuration file documents every option.
 .PP
+.B companion_interface
+in
+.B [companion]
+selects
+.B unix
+(the default) or
+.BR tcp .
+The Unix socket path is set by
+.BR companion_socket .
+TCP uses
+.B companion_bind
+and
+.BR companion_port .
+Selecting TCP is the explicit opt-in to a network service; its bind address
+defaults to loopback.
+.PP
 The AIO v2 gates power to each subsystem behind a GPIO. GPIO16 must be driven
 high or the SX1262 is unpowered and every SPI read returns zeroes. The daemon
 does not switch that rail: turn it on with whatever manages the board's power.
@@ -93,19 +110,21 @@ will see the node as a stranger.
 .I /var/lib/coreletd/channels
 Learned contacts and configured channels.
 .TP
+.I /run/coreletd/companion.sock
+Default companion endpoint, owned by the service user and group with mode 0660.
+.TP
 .I /usr/lib/udev/rules.d/99\-coreletd.rules
 Grants the
 .B coreletd
 group access to the SPI bus and the GPIO character devices, so the daemon need
 not run as root.
 .SH SECURITY
-The companion protocol has no authentication whatsoever. Anyone who can reach
-the port can read messages and send as this node, so
-.B companion_bind
-in
-.B [companion]
-defaults to 127.0.0.1. Widen it only on a trusted network, ideally behind an
-SSH tunnel or WireGuard.
+The companion protocol has no authentication whatsoever. The default Unix
+socket limits access to members of the
+.B coreletd
+group. TCP defaults to 127.0.0.1; selecting the TCP interface permits any
+configured bind address. Prefer an SSH tunnel or WireGuard to exposing it
+directly.
 .SH EXIT STATUS
 Returns 0 on a clean shutdown after SIGINT or SIGTERM, 1 if the configuration
 cannot be loaded or the radio cannot be brought up, and 2 for a usage error.

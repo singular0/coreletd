@@ -6,10 +6,10 @@ A [MeshCore](https://meshcore.co.uk) node for the
 expansion board — the firmware part, running as a Linux daemon.
 
 It drives the board's SX1262 LoRa transceiver directly, speaks the MeshCore mesh protocol, and
-offers the **companion protocol over TCP**, so the uConsole behaves like any other MeshCore radio:
-point the MeshCore phone or web app, [Corelet](https://github.com/singular0/corelet),
-[`meshcore-cli`](https://github.com/fdlamotte/meshcore-cli) or `meshtui` at it — from the uConsole
-itself over loopback, or from another machine on your network.
+offers the **companion protocol over a local Unix socket** (or optional TCP), so the uConsole
+behaves like any other MeshCore radio: point a compatible app at the socket, or enable loopback TCP
+for [Corelet](https://github.com/singular0/corelet),
+[`meshcore-cli`](https://github.com/fdlamotte/meshcore-cli) or `meshtui`.
 
 One binary, one systemd unit, no Arduino layer underneath.
 
@@ -49,10 +49,10 @@ Unchecked boxes are not implemented — use different firmware for those.
 
 **Clients**
 
-- [x] The companion protocol over TCP, on loopback by default.
+- [x] The companion protocol over a group-restricted Unix domain socket by default.
+- [x] Optional TCP, bound to loopback by default.
 - [x] One app at a time, as the protocol assumes. A new connection takes over from the old one, so
       a client that died without closing its socket cannot lock you out.
-- [ ] A Unix domain socket, for clients on the uConsole itself.
 - Bluetooth LE and USB-serial are **not planned**. They are how you reach a microcontroller; this
   runs on a Linux box that already has a network stack.
 
@@ -215,10 +215,30 @@ daemons cannot share the radio:
 
 ```sh
 sudo systemctl stop coreletd
-sudo /usr/sbin/coreletd --config /etc/coreletd/coreletd.ini --verbose
+sudo install -d -o coreletd -g coreletd -m 0750 /run/coreletd
+sudo -u coreletd env HOME=/var/lib/coreletd \
+  /usr/sbin/coreletd --config /etc/coreletd/coreletd.ini --verbose
 ```
 
-Then point a client at the companion port:
+The default companion endpoint is `/run/coreletd/companion.sock`. It is owned by
+`coreletd:coreletd` with mode `0660`; add the local user running the client to that group, then log
+out and back in:
+
+```sh
+sudo adduser "$USER" coreletd
+```
+
+For a client that only supports TCP, select the TCP interface in `[companion]` and restart the
+daemon:
+
+```ini
+[companion]
+companion_interface = tcp
+companion_bind = 127.0.0.1
+companion_port = 5000
+```
+
+Then connect as before:
 
 ```sh
 meshcore-cli -t 127.0.0.1:5000
@@ -247,12 +267,12 @@ node that never speaks again. Purging the package leaves the file in place for e
 
 ## Security
 
-The companion protocol has **no authentication of any kind**. Anyone who can reach the port can read
-your messages and send messages as you. `companion_bind` in `[companion]` therefore defaults to
-`127.0.0.1`.
+The companion protocol has **no authentication of any kind**. The default Unix socket limits access
+to the `coreletd` user and group. If TCP is selected, anyone who can reach the port can read your
+messages and send messages as you; `companion_bind` therefore defaults to `127.0.0.1`.
 
-Only widen it to `0.0.0.0` on a network you control, and preferably reach it over an SSH tunnel or
-WireGuard instead:
+Selecting the TCP interface is the explicit opt-in to network service. Prefer keeping it on
+loopback and reaching it over an SSH tunnel or WireGuard instead of widening `companion_bind`:
 
 ```sh
 ssh -L 5000:127.0.0.1:5000 uconsole.local

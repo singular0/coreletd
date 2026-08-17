@@ -17,6 +17,8 @@ Group=coreletd
 # systemd creates and owns this before start, so it need not be pre-made.
 StateDirectory=coreletd
 StateDirectoryMode=0750
+RuntimeDirectory=coreletd
+RuntimeDirectoryMode=0750
 Environment=HOME=/var/lib/coreletd
 
 # The daemon needs nothing beyond its own state, SPI and GPIO.

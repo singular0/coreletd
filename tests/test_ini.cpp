@@ -172,6 +172,40 @@ static void test_retry_interval() {
     std::remove(path.c_str());
 }
 
+static void test_companion_interfaces() {
+    std::string path = write_temp("[radio]\nlora_freq = 869.618\n");
+    Config def;
+    std::string error;
+    CHECK(def.load(path, error));
+    CHECK(def.companion.transport == companion::Server::Transport::Unix);
+    CHECK(def.companion.socket_path == "/run/coreletd/companion.sock");
+
+    path = write_temp(
+        "[radio]\n"
+        "lora_freq = 869.618\n"
+        "[companion]\n"
+        "companion_interface = tcp\n"
+        "companion_bind = 127.0.0.2\n"
+        "companion_port = 6000\n");
+    Config tcp;
+    CHECK(tcp.load(path, error));
+    CHECK(tcp.companion.transport == companion::Server::Transport::Tcp);
+    CHECK(tcp.companion.bind_addr == "127.0.0.2");
+    CHECK_EQ(tcp.companion.port, uint16_t {6000});
+
+    path = write_temp(
+        "[radio]\n"
+        "lora_freq = 869.618\n"
+        "[companion]\n"
+        "companion_interface = serial\n");
+    Config bad;
+    std::string bad_error;
+    CHECK(!bad.load(path, bad_error));
+    CHECK(bad_error.find("unix") != std::string::npos);
+
+    std::remove(path.c_str());
+}
+
 static std::string as_sectioned_setting(const std::string& setting) {
     size_t dot = setting.find('.');
     CHECK(dot != std::string::npos);
@@ -336,6 +370,7 @@ int main() {
     test_bad_values_are_reported();
     test_unread_keys_are_tracked();
     test_retry_interval();
+    test_companion_interfaces();
     test_config_rejects_malformed_and_unsafe_values();
     test_config_accepts_valid_boundaries();
     test_config_requires_sections();

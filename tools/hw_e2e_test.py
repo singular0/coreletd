@@ -593,6 +593,7 @@ class Harness:
             # this script asked for.
             "advert_interval = 0",
             "[companion]",
+            "companion_interface = tcp",
             "companion_bind = 127.0.0.1",
             f"companion_port = {self.a.remote_port}",
             "[logging]",

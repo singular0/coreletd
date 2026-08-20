@@ -8,15 +8,17 @@ uint32_t Radio::airtime_ms(size_t bytes) const {
     const RadioParams& p = params();
     if (p.sf < 5 || p.bw_khz <= 0) return 0;
 
-    // Standard LoRa time-on-air. MeshCore disables low-data-rate optimisation,
-    // so the DE term is zero.
+    // Standard LoRa time-on-air. The DE term follows the same low-data-rate
+    // threshold the modem is configured with, or duty-cycle accounting
+    // undercounts exactly the slow settings that spend the most airtime.
+    const bool de = p.low_data_rate_optimize();
     const double bw_hz = p.bw_khz * 1000.0;
     const double t_sym = std::pow(2.0, p.sf) / bw_hz;  // seconds
     const double t_preamble = (p.preamble + 4.25) * t_sym;
 
     const int cr = p.cr >= 5 && p.cr <= 8 ? p.cr - 4 : 4;  // 4/(4+cr)
     const double numerator = 8.0 * bytes - 4.0 * p.sf + 28 + 16 /* CRC on */;
-    const double denominator = 4.0 * p.sf;  // explicit header, DE = 0
+    const double denominator = 4.0 * (p.sf - (de ? 2 : 0));  // explicit header
     double n_payload = 8 + std::ceil(numerator / denominator) * (4 + cr);
     if (n_payload < 8) n_payload = 8;
 

@@ -37,6 +37,17 @@ struct RadioParams {
     int current_limit_ma = 140;
     // Regulatory transmit budget, as a percentage of wall time.
     double duty_cycle_pct = 10.0;
+
+    // Low-data-rate optimisation is part of the physical layer, not a tuning
+    // preference: a mismatch is no link at all, in either direction, with a
+    // healthy-looking radio at both ends. MeshCore never calls RadioLib's
+    // forceLDRO(), so ldroAuto stays true and SX126x::setModulationParams
+    // recomputes the bit from the symbol time on every call — on once a symbol
+    // reaches 16 ms. Derive it the same way rather than picking a value.
+    bool low_data_rate_optimize() const {
+        if (sf < 5 || bw_khz <= 0) return false;
+        return static_cast<double>(uint32_t {1} << sf) / bw_khz >= 16.0;
+    }
 };
 
 class Radio {

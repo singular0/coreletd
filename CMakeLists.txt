@@ -165,7 +165,7 @@ endif()
 
 if(CORELETD_BUILD_TESTS)
     enable_testing()
-    foreach(t bytes crypto packet ini eventloop companion mesh app)
+    foreach(t bytes crypto packet ini eventloop companion mesh radio app)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE coreletd_core)
         # Tests include their helpers as "tests/...", so the project root must

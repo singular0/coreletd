@@ -623,9 +623,12 @@ bool Sx1262::configure(std::string& error) {
 }
 
 bool Sx1262::set_modulation() {
-    // sf, bw, cr, low-data-rate optimisation. MeshCore leaves LDRO off.
+    // sf, bw, cr, low-data-rate optimisation. The last one is derived from the
+    // symbol time because that is what RadioLib does for MeshCore; see
+    // RadioParams::low_data_rate_optimize.
     Bytes args {params_.sf, bw_code(params_.bw_khz),
-                static_cast<uint8_t>(params_.cr - 4), 0x00};
+                static_cast<uint8_t>(params_.cr - 4),
+                static_cast<uint8_t>(params_.low_data_rate_optimize() ? 0x01 : 0x00)};
     return cmd(kCmdSetModulationParams, args);
 }
 

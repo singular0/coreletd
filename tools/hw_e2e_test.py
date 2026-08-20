@@ -91,6 +91,7 @@ T_CLI_BLE = 60          # a BLE connect alone is ~3 s, and a scan can be slower
 T_RADIO_READY = 45      # the SX1262 retry interval is 10 s; allow a few
 T_ADVERT = 45           # advert out, peer's contact list updated
 T_MESSAGE = 30
+T_STATE_FLUSH = 10      # StateWriter coalesces over 1 s; a 60 s sweep backstops it
 # A message is not late until the whole retry ladder has run: coreletd tries at
 # 0, +8, +24 and +56 s, escalating to flood on the way. On a band with other
 # traffic on it, needing the second or third attempt is the system working.
@@ -705,7 +706,16 @@ class Harness:
           found.get("out_path_len", -1) >= 0,
           f"out_path_len={found.get('out_path_len')} path={found.get('out_path')!r}")
 
-        on_disk = self.ssh.run(f"ls -l {self.state}/contacts 2>&1").stdout.strip()
+        # StateWriter coalesces for a second before it replaces the file, so
+        # reading it the instant the contact appears is a race the daemon wins
+        # or loses depending on how long the advert took to arrive. Give it a
+        # bounded wait: still a failure if the write never lands.
+        end = time.time() + T_STATE_FLUSH
+        while True:
+            on_disk = self.ssh.run(f"ls -l {self.state}/contacts 2>&1").stdout.strip()
+            if "No such file" not in on_disk or time.time() >= end:
+                break
+            time.sleep(0.5)
         c("advert_rx", "the contact reached the state directory",
           "No such file" not in on_disk, on_disk[-70:])
 

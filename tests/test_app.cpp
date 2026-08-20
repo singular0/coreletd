@@ -157,6 +157,33 @@ private:
     int fd_ = -1;
 };
 
+// The reply to a flood-routed message is a PATH return with the ack inside it,
+// so reading the ack means decrypting one. Returns what A would decode.
+std::optional<proto::PathReturn> path_return_to_a(const proto::Packet& p) {
+    auto peer = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivB));
+    if (!peer || !self) return std::nullopt;
+    auto shared = peer->shared_secret(self->pub());
+    if (!shared) return std::nullopt;
+    auto env = proto::DirectEnvelope::decode(p.payload);
+    if (!env) return std::nullopt;
+    auto plain = crypto::mac_and_decrypt(*shared, env->mac, env->ciphertext);
+    if (!plain) return std::nullopt;
+    return proto::PathReturn::decode(*plain);
+}
+
+// The bundled ack, checked the way A would: the first four bytes are the hash,
+// and everything past the six MeshCore writes is block padding.
+void check_bundled_ack(const proto::Packet& sent, std::string_view want_hash) {
+    CHECK(sent.type == proto::PayloadType::Path);
+    auto ret = path_return_to_a(sent);
+    CHECK(ret.has_value());
+    if (!ret) return;
+    CHECK_EQ(ret->extra_type, static_cast<uint8_t>(proto::PayloadType::Ack));
+    CHECK(ret->extra.size() >= 6);
+    if (ret->extra.size() >= 4) CHECK_BYTES(subview(ret->extra, 0, 4), from_hex(want_hash));
+}
+
 }  // namespace
 
 // A packet goes in at the antenna and the reply comes back out of it. The only
@@ -181,15 +208,15 @@ static void test_received_text_is_acked_on_air() {
 
     air->inject(from_hex(pv::kTextPacket));
 
-    // The ack needs no timer to get out: the radio is ready and nothing is
-    // queued ahead of it.
+    // The reply needs no timer to get out: the radio is ready and nothing is
+    // queued ahead of it. The reference packet is flood-routed, so the reply is
+    // a PATH return teaching A the way back, with the ack riding inside it
+    // rather than costing a second transmission.
     CHECK_EQ(air->send_count(), size_t {1});
     auto sent = proto::Packet::decode(air->last_sent());
     CHECK(sent.has_value());
     if (!sent) return;
-    CHECK(sent->type == proto::PayloadType::Ack);
-    CHECK_EQ(sent->payload.size(), size_t {6});
-    CHECK_BYTES(subview(sent->payload, 0, 4), from_hex(pv::kTextAckHash));
+    check_bundled_ack(*sent, pv::kTextAckHash);
 
     // Shutting down flushes what the exchange changed, so the contact A
     // advertised is on disk under the name it advertised.
@@ -233,7 +260,7 @@ static void test_message_received_offline_survives_a_restart() {
         CHECK_EQ(air->send_count(), size_t {1});
         auto sent = proto::Packet::decode(air->last_sent());
         CHECK(sent.has_value());
-        if (sent) CHECK(sent->type == proto::PayloadType::Ack);
+        if (sent) check_bundled_ack(*sent, pv::kTextAckHash);
 
         app.request_stop();
     }
@@ -471,13 +498,10 @@ static void test_corrupt_contacts_recover_from_the_backup() {
     CHECK_EQ(air->send_count(), size_t {1});
     auto sent = proto::Packet::decode(air->last_sent());
     CHECK(sent.has_value());
-    if (sent) {
-        CHECK(sent->type == proto::PayloadType::Ack);
-        // Six bytes now: the hash, the extended attempt byte, and a random one
-        // so two acks for the same message are not the same packet.
-        CHECK_EQ(sent->payload.size(), size_t {6});
-        CHECK_BYTES(subview(sent->payload, 0, 4), from_hex(pv::kTextAckHash));
-    }
+    // Six bytes of ack inside the path return: the hash, the extended attempt
+    // byte, and a random one so two acks for the same message are not the same
+    // packet.
+    if (sent) check_bundled_ack(*sent, pv::kTextAckHash);
     app.request_stop();
 }
 

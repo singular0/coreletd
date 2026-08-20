@@ -726,6 +726,12 @@ class Harness:
         self.ensure_peer_contact()
         body = self.tag("rx")
 
+        # Read the peer's route to us before the exchange, not after: our reply
+        # to a flood-routed message teaches it one, so asking afterwards would
+        # be asking about a route that did not exist when the message was sent.
+        before = self.peer.find_contact(self.uconsole_key[:12]) or {}
+        knew_route = before.get("out_path_len", -1) >= 0
+
         # The peer waits for the ack itself. coreletd only acks a message it
         # decrypted and stored, so an ack here already proves the receive path
         # end to end; reading the inbox afterwards proves the contents.
@@ -765,14 +771,27 @@ class Harness:
             # arrived with. Which of the two the peer sent is not ours to
             # choose, so ask the peer: it routes direct exactly when it holds an
             # out_path for us, and floods otherwise.
-            route = self.peer.find_contact(self.uconsole_key[:12]) or {}
-            direct = route.get("out_path_len", -1) >= 0
             plen = got.get("path_len")
             c("message_rx", "path_len says how the message was routed",
-              plen == 255 if direct else isinstance(plen, int) and 0 <= plen <= 63,
-              f"path_len {plen}, and the peer holds "
-              f"{'a route' if direct else 'no route'} to us "
-              f"(out_path_len={route.get('out_path_len')})")
+              plen == 255 if knew_route else isinstance(plen, int) and 0 <= plen <= 63,
+              f"path_len {plen}, and the peer held "
+              f"{'a route' if knew_route else 'no route'} to us when it sent "
+              f"(out_path_len={before.get('out_path_len')})")
+
+            # A flood-routed message means the sender has no way back, and
+            # MeshCore learns one only from a returned path — not from adverts.
+            # Our reply carries it, so the peer that had none now holds one and
+            # stops flooding at us.
+            if not knew_route:
+                learned, end = {}, time.time() + T_MESSAGE
+                while time.time() < end:
+                    learned = self.peer.find_contact(self.uconsole_key[:12]) or {}
+                    if learned.get("out_path_len", -1) >= 0:
+                        break
+                c("message_rx", "our reply taught the peer a route back to us",
+                  learned.get("out_path_len", -1) >= 0,
+                  f"out_path_len={learned.get('out_path_len')} "
+                  f"path={learned.get('out_path')!r}")
 
     def phase_message_tx(self) -> None:
         self.banner("message_tx", "coreletd → peer, retried until acknowledged")

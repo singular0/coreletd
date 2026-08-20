@@ -111,7 +111,12 @@ private:
     void expire_delivered();
 
     void store_message(StoredMessage msg);
-    void send_ack(const Contact& to, ByteView ack_hash, uint8_t extended_attempt);
+    void send_ack(const Contact& to, ByteView ack);
+    // Tells `to` how to reach us: the path `inbound` arrived by, unreversed and
+    // encrypted to that contact. `extra` rides inside it — an ack, normally,
+    // which is how answering a flood-routed message still costs one packet.
+    void send_path_return(Contact& to, const proto::Packet& inbound, uint8_t extra_type,
+                          ByteView extra);
     void record_return_path(Contact& c, const proto::Packet& p);
 
     proto::AdvertAppData build_appdata() const;

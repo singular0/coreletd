@@ -935,6 +935,170 @@ static void test_direct_ack_marks_store_dirty() {
 // The radio receives whether or not an app is connected, so the inbox is
 // bounded and drops the oldest message rather than growing. On its own that
 // takes three messages to demonstrate; through a node it took 257 packets.
+// A peer that floods to us has no route back, and it only ever learns one from
+// a returned path: MeshCore does not take routes from adverts. Without this the
+// peer floods every packet to us for good, doubling the airtime in that
+// direction permanently.
+static void test_flood_message_is_answered_with_a_path_return() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivB));
+    auto peer_id = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self || !peer_id) return;
+
+    ContactStore contacts(*self);
+    Contact& peer = *contacts.upsert(from_hex(pv::kPubA));
+    ChannelStore channels;
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+    radio.set_ready(true);
+
+    Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
+    node.start();
+
+    const Bytes shared = peer.shared_secret(*peer_id);
+    CHECK(!shared.empty());
+    if (shared.empty()) return;
+
+    // Two hops of flood path, so the route in the reply is something other
+    // than empty and its direction is observable.
+    auto send_text = [&](proto::RouteType route, uint32_t timestamp) {
+        proto::TextMessage msg;
+        msg.timestamp = timestamp;
+        msg.txt_type = proto::kTxtPlain;
+        msg.text = from_str("are you there");
+        proto::Packet p;
+        p.type = proto::PayloadType::TxtMsg;
+        p.route = route;
+        p.path_hash_size = 1;
+        if (route == proto::RouteType::Flood) p.path = {0x11, 0x22};
+        p.payload = proto::DirectEnvelope::seal(self->pub()[0], peer_id->pub()[0], shared,
+                                                msg.encode())
+                        .encode();
+        radio.inject(p.encode());
+        radio.complete_tx();
+    };
+
+    send_text(proto::RouteType::Flood, 1700000000);
+
+    CHECK_EQ(radio.send_count(), size_t {1});
+    auto sent = proto::Packet::decode(radio.last_sent());
+    CHECK(sent.has_value());
+    if (!sent) return;
+    CHECK(sent->type == proto::PayloadType::Path);
+
+    // It goes out along the route we just learned, which is that path reversed.
+    CHECK(sent->is_direct());
+    CHECK_BYTES(sent->path, (Bytes {0x22, 0x11}));
+
+    auto env = proto::DirectEnvelope::decode(sent->payload);
+    CHECK(env.has_value());
+    if (!env) return;
+    auto plain = crypto::mac_and_decrypt(shared, env->mac, env->ciphertext);
+    CHECK(plain.has_value());
+    if (!plain) return;
+    auto ret = proto::PathReturn::decode(*plain);
+    CHECK(ret.has_value());
+    if (!ret) return;
+
+    // Unreversed: this is the order the peer's packets will travel in, which
+    // is the opposite of the order ours do.
+    CHECK_BYTES(ret->path, (Bytes {0x11, 0x22}));
+    CHECK_EQ(ret->path_hash_size, uint8_t {1});
+
+    // And the ack rides inside it rather than costing a second transmission.
+    CHECK(ret->has_extra);
+    CHECK_EQ(ret->extra_type, static_cast<uint8_t>(proto::PayloadType::Ack));
+    CHECK(ret->extra.size() >= crypto::kAckHashSize);
+
+    // A direct-routed message needs no such thing: the sender demonstrably has
+    // a route already, so the reply is a plain ack.
+    send_text(proto::RouteType::Direct, 1700000001);
+    CHECK_EQ(radio.send_count(), size_t {2});
+    auto ack = proto::Packet::decode(radio.last_sent());
+    CHECK(ack.has_value());
+    if (ack) {
+        CHECK(ack->type == proto::PayloadType::Ack);
+        CHECK_EQ(ack->payload.size(), size_t {6});
+    }
+}
+
+// A peer whose own PATH reaches us flood-routed has no route to us either, so
+// it gets one back — direct, along the route it just gave us. Its reply lands
+// direct-routed, which is what stops the exchange rather than bouncing.
+static void test_flood_path_return_is_reciprocated() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivB));
+    auto peer_id = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self || !peer_id) return;
+
+    ContactStore contacts(*self);
+    Contact& peer = *contacts.upsert(from_hex(pv::kPubA));
+    ChannelStore channels;
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+    radio.set_ready(true);
+
+    Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
+    node.start();
+
+    const Bytes shared = peer.shared_secret(*peer_id);
+    if (shared.empty()) return;
+
+    auto send_path = [&](proto::RouteType route) {
+        proto::PathReturn ret;
+        ret.path = {0x33};  // the route the peer says to use for it
+        proto::Packet p;
+        p.type = proto::PayloadType::Path;
+        p.route = route;
+        p.path_hash_size = 1;
+        if (route == proto::RouteType::Flood) p.path = {0x44};
+        p.payload = proto::DirectEnvelope::seal(self->pub()[0], peer_id->pub()[0], shared,
+                                                ret.encode())
+                        .encode();
+        radio.inject(p.encode());
+        radio.complete_tx();
+    };
+
+    send_path(proto::RouteType::Flood);
+
+    // The route it gave us is stored, and the reply goes back along it.
+    CHECK(peer.path_known);
+    CHECK_BYTES(peer.out_path, (Bytes {0x33}));
+    CHECK_EQ(radio.send_count(), size_t {1});
+    auto sent = proto::Packet::decode(radio.last_sent());
+    CHECK(sent.has_value());
+    if (!sent) return;
+    CHECK(sent->type == proto::PayloadType::Path);
+    CHECK(sent->is_direct());
+    CHECK_BYTES(sent->path, (Bytes {0x33}));
+
+    auto env = proto::DirectEnvelope::decode(sent->payload);
+    if (!env) return;
+    auto plain = crypto::mac_and_decrypt(shared, env->mac, env->ciphertext);
+    CHECK(plain.has_value());
+    if (!plain) return;
+    auto ret = proto::PathReturn::decode(*plain);
+    CHECK(ret.has_value());
+    if (ret) {
+        // The inbound path, unreversed, is the peer's route to us.
+        CHECK_BYTES(ret->path, (Bytes {0x44}));
+        // Nothing to bundle, so MeshCore's dummy type and four random bytes go
+        // in instead: two identical path returns would otherwise be one packet
+        // as far as every repeater between here and there is concerned.
+        CHECK(ret->has_extra);
+        CHECK_EQ(ret->extra_type, uint8_t {0x0F});
+    }
+
+    // A direct-routed one needs no answer: the sender has a route already, and
+    // replying to every reply is how two nodes talk to each other for ever.
+    send_path(proto::RouteType::Direct);
+    CHECK_EQ(radio.send_count(), size_t {1});
+}
+
 static void test_inbox_drops_oldest_when_full() {
     MessageInbox inbox(2);
     for (int i = 0; i < 3; i++) {
@@ -1274,6 +1438,8 @@ int main() {
     test_received_message_marks_store_dirty();
     test_retries_are_acked_every_time_but_delivered_once();
     test_direct_ack_marks_store_dirty();
+    test_flood_message_is_answered_with_a_path_return();
+    test_flood_path_return_is_reciprocated();
     test_inbox_drops_oldest_when_full();
     test_inbox_eviction_is_counted();
     test_inbox_survives_a_restart();

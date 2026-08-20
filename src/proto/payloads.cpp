@@ -301,16 +301,25 @@ Bytes ack_payload(ByteView ack_hash, uint8_t extended_attempt) {
 
 std::optional<PathReturn> PathReturn::decode(ByteView plaintext) {
     Reader r(plaintext);
+    // The same packed byte the packet header carries, not a byte count: hop
+    // count in bits 0-5, hash size - 1 in bits 6-7.
     const uint8_t path_len = r.u8();
-    ByteView path = r.take(path_len);
     if (!r.ok()) return std::nullopt;
 
     PathReturn p;
+    p.path_hash_size = static_cast<uint8_t>((path_len >> 6) + 1);
+    if (p.path_hash_size == 4) return std::nullopt;  // reserved
+
+    ByteView path = r.take(static_cast<size_t>(path_len & 0x3F) * p.path_hash_size);
+    if (!r.ok() || path.size() > kMaxPathSize) return std::nullopt;
     p.path.assign(path.begin(), path.end());
 
     if (r.has(1)) {
         p.has_extra = true;
-        p.extra_type = r.u8();
+        // Only the low nibble is the payload type; the upper four bits are
+        // reserved, and a sender that starts using them must not turn our ACK
+        // into an unrecognised type.
+        p.extra_type = static_cast<uint8_t>(r.u8() & 0x0F);
         // Whatever follows is the bundled payload; padding is the caller's
         // problem since only it knows the extra type's length.
         ByteView extra = r.rest();
@@ -320,12 +329,15 @@ std::optional<PathReturn> PathReturn::decode(ByteView plaintext) {
 }
 
 Bytes PathReturn::encode() const {
+    const uint8_t hash_size = path_hash_size ? path_hash_size : 1;
+    const size_t hops = path.size() / hash_size;
+
     Bytes out;
     out.reserve(1 + path.size() + 1 + extra.size());
-    out.push_back(static_cast<uint8_t>(path.size()));
+    out.push_back(static_cast<uint8_t>((hops & 0x3F) | ((hash_size - 1) << 6)));
     put_bytes(out, path);
     if (has_extra) {
-        out.push_back(extra_type);
+        out.push_back(static_cast<uint8_t>(extra_type & 0x0F));
         put_bytes(out, extra);
     }
     return out;

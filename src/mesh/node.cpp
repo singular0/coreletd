@@ -257,21 +257,70 @@ void Node::handle_text(const proto::Packet& p) {
     }
 
     // CLI responses are never acked.
+    Bytes ack;
     if (msg->txt_type != proto::kTxtCliData) {
         ByteView ack_key =
             msg->txt_type == proto::kTxtSignedPlain ? self_.pub() : ByteView(from->pubkey);
-        send_ack(*from, proto::message_ack_hash(plaintext, ack_key),
-                 proto::ack_extended_attempt(plaintext));
+        ack = proto::ack_payload(proto::message_ack_hash(plaintext, ack_key),
+                                 proto::ack_extended_attempt(plaintext));
+    }
+
+    // A flood-routed message means the sender has no route to us. Answer with
+    // the route it should use — and put the ack inside it, so the reply still
+    // costs one transmission rather than two. Without this the sender floods
+    // every packet to us for good: it learns a path only from a returned one.
+    if (p.is_flood()) {
+        send_path_return(*from, p, ack.empty() ? 0 : static_cast<uint8_t>(proto::PayloadType::Ack),
+                         ack);
+    } else if (!ack.empty()) {
+        send_ack(*from, ack);
     }
 }
 
-void Node::send_ack(const Contact& to, ByteView ack_hash, uint8_t extended_attempt) {
+void Node::send_ack(const Contact& to, ByteView ack) {
     proto::Packet p;
     p.type = proto::PayloadType::Ack;
-    p.payload = proto::ack_payload(ack_hash, extended_attempt);
+    p.payload.assign(ack.begin(), ack.end());
 
-    LOG_DEBUG("ack: sending %s", hex(ack_hash).c_str());
+    LOG_DEBUG("ack: sending %s", hex(subview(ack, 0, crypto::kAckHashSize)).c_str());
     route_to(dispatcher_, p, to, kPriorityAck);
+}
+
+void Node::send_path_return(Contact& to, const proto::Packet& inbound, uint8_t extra_type,
+                            ByteView extra) {
+    const Bytes& shared = to.shared_secret(self_);
+    if (shared.empty()) return;  // unusable key; nothing to encrypt with
+
+    proto::PathReturn ret;
+    ret.path = inbound.path;
+    ret.path_hash_size = inbound.path_hash_size;
+    ret.has_extra = true;
+    if (!extra.empty()) {
+        ret.extra_type = extra_type;
+        ret.extra.assign(extra.begin(), extra.end());
+    } else {
+        // MeshCore fills an empty extra with a dummy type and four random bytes,
+        // because two path returns carrying the same route would otherwise be
+        // byte-identical and every repeater in between would drop the second as
+        // a duplicate. Ours would too: the dedup hash covers the payload.
+        ret.extra_type = 0x0F;
+        ret.extra.resize(4);
+        crypto::random_bytes(ret.extra);
+    }
+
+    proto::Packet p;
+    p.type = proto::PayloadType::Path;
+    p.payload = proto::DirectEnvelope::seal(to.pubkey[0], self_.pub()[0], shared, ret.encode())
+                    .encode();
+
+    LOG_DEBUG("path: returning route %s to %s%s",
+              ret.path.empty() ? "direct" : hex(ret.path).c_str(),
+              hex_prefix(to.pubkey).c_str(),
+              extra.empty() ? "" : " with an ack inside");
+    // Ack priority whether or not it carries one: a path return that arrives
+    // after the sender has given up and retried has taught it nothing.
+    if (!route_to(dispatcher_, p, to, kPriorityAck))
+        LOG_WARN("path: return to %s did not fit a packet", hex_prefix(to.pubkey).c_str());
 }
 
 void Node::handle_ack(const proto::Packet& p) {
@@ -305,11 +354,19 @@ void Node::handle_path(const proto::Packet& p) {
     auto path = proto::PathReturn::decode(plaintext);
     if (!path) return;
 
-    contacts_.set_path(*from, path->path);
-    contacts_.touch(*from);
-    LOG_INFO("path: %s returned route %s", hex_prefix(from->pubkey).c_str(),
-             path->path.empty() ? "direct" : hex(path->path).c_str());
-    if (delegate_) delegate_->on_path_updated(*from);
+    // Wider hashes are a route we cannot address yet — routing writes 1-byte
+    // hops — and storing one would install a path that reaches nobody. The rest
+    // of the packet is still worth having.
+    if (path->path_hash_size == 1) {
+        contacts_.set_path(*from, path->path);
+        contacts_.touch(*from);
+        LOG_INFO("path: %s returned route %s", hex_prefix(from->pubkey).c_str(),
+                 path->path.empty() ? "direct" : hex(path->path).c_str());
+        if (delegate_) delegate_->on_path_updated(*from);
+    } else {
+        LOG_DEBUG("path: %s returned a %u-byte-hash route we cannot use yet",
+                  hex_prefix(from->pubkey).c_str(), path->path_hash_size);
+    }
 
     // A returned path can carry an ack rather than costing a second packet.
     if (path->has_extra && path->extra_type == static_cast<uint8_t>(proto::PayloadType::Ack) &&
@@ -321,6 +378,11 @@ void Node::handle_path(const proto::Packet& p) {
                             path->extra.begin() + crypto::kAckHashSize);
         handle_ack(fake);
     }
+
+    // It reached us flood-routed, so the sender has no route to us either.
+    // Answer with one — direct, along the route it just gave us. Its own reply
+    // will arrive direct and stops the exchange there.
+    if (p.is_flood()) send_path_return(*from, p, 0, {});
 }
 
 void Node::handle_group_text(const proto::Packet& p) {

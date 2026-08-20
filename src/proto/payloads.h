@@ -172,7 +172,12 @@ Bytes message_ack_hash(ByteView plaintext, ByteView pubkey);
 Bytes ack_payload(ByteView ack_hash, uint8_t extended_attempt);
 
 struct PathReturn {
+    // The route the sender should use to reach us, in the order it will be
+    // travelled — the inbound path of the flood packet that prompted this, not
+    // reversed. `path` holds hop_count * path_hash_size bytes, and the length
+    // on the wire is the same packed byte a packet header carries.
     Bytes path;
+    uint8_t path_hash_size = 1;
     // An ack or response can ride along inside a returned path instead of
     // costing a second transmission.
     uint8_t extra_type = 0;

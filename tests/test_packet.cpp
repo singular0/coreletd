@@ -356,6 +356,70 @@ static void test_outbound_packet_validation() {
     CHECK(!p.valid());
 }
 
+static void test_path_return_codec() {
+    // The length on the wire is the packed path_length byte, the same one a
+    // packet header carries — not a byte count. They agree at 1-byte hashes,
+    // which is why this was invisible.
+    PathReturn p;
+    p.path = {0xaa, 0xbb, 0xcc};
+    p.has_extra = true;
+    p.extra_type = static_cast<uint8_t>(PayloadType::Ack);
+    p.extra = {1, 2, 3, 4, 5, 6};
+
+    Bytes enc = p.encode();
+    CHECK_EQ(enc[0], uint8_t {0x03});  // 3 hops, 1-byte hashes
+
+    auto back = PathReturn::decode(enc);
+    CHECK(back.has_value());
+    if (back) {
+        CHECK_BYTES(back->path, p.path);
+        CHECK_EQ(back->path_hash_size, uint8_t {1});
+        CHECK(back->has_extra);
+        CHECK_EQ(back->extra_type, uint8_t {0x03});
+        CHECK_BYTES(back->extra, p.extra);
+    }
+
+    // 2-byte hashes: three hops is six bytes, and the count is what goes on
+    // the wire.
+    PathReturn wide = p;
+    wide.path_hash_size = 2;
+    wide.path = {1, 2, 3, 4, 5, 6};
+    Bytes wide_enc = wide.encode();
+    CHECK_EQ(wide_enc[0], uint8_t {0x43});
+    auto wide_back = PathReturn::decode(wide_enc);
+    CHECK(wide_back.has_value());
+    if (wide_back) {
+        CHECK_EQ(wide_back->path_hash_size, uint8_t {2});
+        CHECK_BYTES(wide_back->path, wide.path);
+        CHECK_BYTES(wide_back->extra, wide.extra);
+    }
+
+    // A path with no extra at all is still a valid return.
+    PathReturn bare;
+    bare.path = {0x11};
+    auto bare_back = PathReturn::decode(bare.encode());
+    CHECK(bare_back.has_value());
+    if (bare_back) {
+        CHECK_BYTES(bare_back->path, bare.path);
+        CHECK(!bare_back->has_extra);
+    }
+
+    // The reserved 4-byte hash size is refused rather than read as something.
+    CHECK(!PathReturn::decode(Bytes {0xC1, 1, 2, 3, 4}).has_value());
+    // Truncated: the byte says three hops and one arrives.
+    CHECK(!PathReturn::decode(Bytes {0x03, 0xaa}).has_value());
+}
+
+static void test_path_return_extra_type_is_only_the_low_nibble() {
+    // MeshCore masks the extra type with 0x0F — the upper four bits are
+    // reserved. A sender that starts using them must not turn our ACK into an
+    // unrecognised type, which would silently drop the bundled ack.
+    Bytes wire = {0x00, 0xA3, 1, 2, 3, 4, 5, 6};
+    auto back = PathReturn::decode(wire);
+    CHECK(back.has_value());
+    if (back) CHECK_EQ(back->extra_type, static_cast<uint8_t>(PayloadType::Ack));
+}
+
 static void test_dedup_hash_ignores_path() {
     Packet a;
     a.type = PayloadType::TxtMsg;
@@ -437,6 +501,8 @@ int main() {
     test_transport_codes();
     test_malformed_packets_rejected();
     test_outbound_packet_validation();
+    test_path_return_codec();
+    test_path_return_extra_type_is_only_the_low_nibble();
     test_dedup_hash_ignores_path();
     test_dedup_hash_covers_path_len_for_trace();
     test_packed_path_len();

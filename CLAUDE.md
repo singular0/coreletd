@@ -98,6 +98,12 @@ Violating any of these produces bugs that only appear against real firmware:
   than the stored one is rejected as a replay.
 - **A contact's path field is a fixed 64 bytes on the wire**, regardless of the hop count in
   `path_len`; read it as such.
+- **MeshCore learns routes only from returned paths, never from adverts.** A peer that has heard
+  our advert still floods every packet at us until it receives a `PATH`, so a flood-routed message
+  from a known contact is answered with one: the inbound path *unreversed* — that is the direction
+  their packets will travel — with the ack bundled in as `extra`, so the reply is still one
+  transmission. A flood-routed `PATH` gets a reciprocal one back, sent direct, which is what ends
+  the exchange rather than trading them for ever.
 
 ### Companion protocol
 

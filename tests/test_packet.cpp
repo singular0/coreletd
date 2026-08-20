@@ -320,6 +320,16 @@ static void test_malformed_packets_rejected() {
     CHECK(!Packet::decode(Bytes {0x11, 0x05}).has_value());
     // Reserved 4-byte path hash size.
     CHECK(!Packet::decode(Bytes {0x11, 0xC1, 1, 2, 3, 4}).has_value());
+    // Path but no payload: MeshCore requires at least one byte after the path.
+    CHECK(!Packet::decode(Bytes {0x11, 0x01, 0xaa}).has_value());
+    CHECK(!Packet::decode(Bytes {0x11, 0x00}).has_value());
+
+    // Payload version 2 and up are reserved for a wider envelope, so they must
+    // be refused rather than mis-parsed as v1.
+    CHECK(Packet::decode(Bytes {0x11, 0x00, 0x55}).has_value());
+    CHECK(!Packet::decode(Bytes {0x51, 0x00, 0x55}).has_value());
+    CHECK(!Packet::decode(Bytes {0x91, 0x00, 0x55}).has_value());
+    CHECK(!Packet::decode(Bytes {0xD1, 0x00, 0x55}).has_value());
 
     // Oversized payload must be refused, matching firmware behaviour.
     Bytes big = {0x11, 0x00};
@@ -365,6 +375,48 @@ static void test_dedup_hash_ignores_path() {
     CHECK(a.dedup_hash() != c.dedup_hash());
 }
 
+static void test_dedup_hash_covers_path_len_for_trace() {
+    // A trace collects a hop per node and can legitimately come back through
+    // one it already passed, so for this one type the hop count is part of the
+    // identity. Everything else must stay path-blind.
+    Packet a;
+    a.type = PayloadType::Trace;
+    a.route = RouteType::Flood;
+    a.payload = {1, 2, 3, 4};
+    a.path = {0xaa};
+
+    Packet b = a;
+    b.path = {0xaa, 0xbb};  // same trace, one hop further along
+    CHECK(a.dedup_hash() != b.dedup_hash());
+
+    // Same hop count on a different route is still the same packet.
+    Packet c = a;
+    c.path = {0xcc};
+    c.route = RouteType::Direct;
+    CHECK_BYTES(a.dedup_hash(), c.dedup_hash());
+
+    // The hash size bits are part of the byte that gets mixed in.
+    Packet d = a;
+    d.path_hash_size = 2;
+    d.path = {0xaa, 0xbb};
+    CHECK(a.dedup_hash() != d.dedup_hash());
+}
+
+static void test_packed_path_len() {
+    Packet p;
+    p.path_hash_size = 1;
+    p.path = {0xaa, 0xbb, 0xcc};
+    CHECK_EQ(p.packed_path_len(), uint8_t {0x03});
+
+    p.path_hash_size = 3;
+    p.path.assign(9, 0x11);
+    CHECK_EQ(p.packed_path_len(), uint8_t {0x83});
+
+    p.path.clear();
+    p.path_hash_size = 1;
+    CHECK_EQ(p.packed_path_len(), uint8_t {0x00});
+}
+
 int main() {
     if (!crypto::init()) return 2;
 
@@ -386,6 +438,8 @@ int main() {
     test_malformed_packets_rejected();
     test_outbound_packet_validation();
     test_dedup_hash_ignores_path();
+    test_dedup_hash_covers_path_len_for_trace();
+    test_packed_path_len();
 
     return finish("packet");
 }

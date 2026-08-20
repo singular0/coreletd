@@ -35,6 +35,12 @@ const char* payload_type_name(PayloadType t) {
     return "RESERVED";
 }
 
+uint8_t Packet::packed_path_len() const {
+    const uint8_t hash_size = path_hash_size ? path_hash_size : 1;
+    const size_t hops = path.size() / hash_size;
+    return static_cast<uint8_t>((hops & 0x3F) | ((hash_size - 1) << 6));
+}
+
 bool Packet::push_hop(ByteView hash) {
     if (path_hash_size == 0 || hash.size() < path_hash_size) return false;
     if (path.size() + path_hash_size > kMaxPathSize) return false;
@@ -66,6 +72,16 @@ std::optional<Packet> Packet::decode(ByteView raw) {
     p.route = static_cast<RouteType>(header & kRouteMask);
     p.type = static_cast<PayloadType>((header & kPayloadTypeMask) >> 2);
     p.payload_version = static_cast<uint8_t>((header & kPayloadVerMask) >> 6);
+
+    // v2 is reserved for 2-byte source/destination hashes and a 4-byte MAC, and
+    // nothing below this line reads the version: the envelope codecs are v1
+    // shaped whatever it says. Parsing a v2 packet as v1 would mis-slice it into
+    // a failed MAC check and then repeat it under a v1 dedup hash, so refuse it
+    // here as MeshCore's Dispatcher::tryParsePacket does.
+    if (p.payload_version > 0) {
+        LOG_DEBUG("packet: unsupported payload version %u", p.payload_version);
+        return std::nullopt;
+    }
 
     if (p.has_transport_codes()) {
         p.transport_code1 = r.u16();
@@ -104,6 +120,13 @@ std::optional<Packet> Packet::decode(ByteView raw) {
     p.path.assign(path.begin(), path.end());
 
     ByteView payload = r.rest();
+    // MeshCore's Packet::readFrom requires at least one byte after the path;
+    // every payload type has a header of its own, so an empty one is a corrupt
+    // packet rather than a valid packet carrying nothing.
+    if (payload.empty()) {
+        LOG_DEBUG("packet: empty payload");
+        return std::nullopt;
+    }
     if (payload.size() > kMaxPayloadSize) {
         LOG_DEBUG("packet: payload of %zu bytes exceeds max %zu", payload.size(), kMaxPayloadSize);
         return std::nullopt;
@@ -135,9 +158,7 @@ Bytes Packet::encode() const {
         put_u16(out, transport_code2);
     }
 
-    const uint8_t hash_size = path_hash_size ? path_hash_size : 1;
-    const size_t hops = path.size() / hash_size;
-    out.push_back(static_cast<uint8_t>((hops & 0x3F) | ((hash_size - 1) << 6)));
+    out.push_back(packed_path_len());
 
     put_bytes(out, path);
     put_bytes(out, payload);
@@ -148,8 +169,12 @@ Bytes Packet::dedup_hash() const {
     // Header type bits without the route type: the same packet can arrive both
     // flood-routed and direct-routed and is still a duplicate.
     Bytes buf;
-    buf.reserve(1 + payload.size());
+    buf.reserve(3 + payload.size());
     buf.push_back(static_cast<uint8_t>(type));
+    // A trace legitimately revisits a node on its return leg, so MeshCore mixes
+    // path_len in for this one type to keep the two visits distinct. Its field
+    // is a uint16_t, hashed whole, so the two bytes are little-endian.
+    if (type == PayloadType::Trace) put_u16(buf, packed_path_len());
     put_bytes(buf, payload);
     return crypto::ack_hash(buf);
 }

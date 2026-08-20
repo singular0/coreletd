@@ -78,6 +78,12 @@ struct Packet {
 
     size_t hop_count() const { return path_hash_size ? path.size() / path_hash_size : 0; }
 
+    // The wire's path_length byte: hop count in bits 0-5, (hash size - 1) in
+    // bits 6-7. Anything that reports a path length outside this file — the
+    // companion protocol, a returned path — must carry this byte rather than a
+    // count of hops or of bytes.
+    uint8_t packed_path_len() const;
+
     // Appends one hop. Returns false if the path is already full, in which case
     // the packet must not be repeated any further.
     bool push_hop(ByteView hash);

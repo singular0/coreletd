@@ -1,5 +1,6 @@
 #include "daemon/app.h"
 
+#include <cstdio>
 #include <filesystem>
 
 #include "crypto/crypto.h"
@@ -18,6 +19,42 @@ namespace clt {
 App::App(Config cfg, std::unique_ptr<radio::Radio> radio, Clock& clock)
     : cfg_(std::move(cfg)), loop_(clock), radio_(std::move(radio)) {}
 App::~App() = default;
+
+namespace {
+
+// Loads a store, and when its file is there but unreadable, moves it aside and
+// tries the copy the previous save left behind.
+//
+// Continuing with an empty store is the last resort rather than the first
+// answer: a lost contact is a peer we can no longer decrypt until it advertises
+// again, and a lost channel key is traffic we can never read. Starting the
+// radio anyway is still right — the daemon exists to be on the air, and a node
+// that refuses to boot helps nobody — but not before the damaged file is out of
+// reach of the next save.
+template <typename Store>
+mesh::LoadResult load_state(Store& store, const std::string& path, const char* what) {
+    mesh::LoadResult result = store.load();
+    if (result != mesh::LoadResult::Corrupt) return result;
+
+    quarantine(path);
+
+    const std::string backup = path + ".bak";
+    if (::rename(backup.c_str(), path.c_str()) != 0) {
+        LOG_ERROR("%s: unreadable and no backup to fall back on; starting empty", what);
+        return mesh::LoadResult::Corrupt;
+    }
+
+    result = store.load();
+    if (result == mesh::LoadResult::Corrupt) {
+        quarantine(path);
+        LOG_ERROR("%s: the backup is unreadable too; starting empty", what);
+        return result;
+    }
+    LOG_WARN("%s: recovered from the copy taken before the last save", what);
+    return result;
+}
+
+}  // namespace
 
 bool App::ensure_state_dir() {
     std::error_code ec;
@@ -80,10 +117,12 @@ bool App::start() {
     if (!load_or_create_identity()) return false;
 
     contacts_ = std::make_unique<mesh::ContactStore>(*identity_, cfg_.contacts_path);
-    if (!contacts_->load()) LOG_INFO("contacts: starting with an empty store");
+    if (load_state(*contacts_, cfg_.contacts_path, "contacts") == mesh::LoadResult::Missing)
+        LOG_INFO("contacts: starting with an empty store");
 
     channels_ = std::make_unique<mesh::ChannelStore>(cfg_.channels_path);
-    if (!channels_->load()) LOG_INFO("channels: using defaults (slot 0 = Public)");
+    if (load_state(*channels_, cfg_.channels_path, "channels") == mesh::LoadResult::Missing)
+        LOG_INFO("channels: using defaults (slot 0 = Public)");
 
     std::string error;
     // Non-null already only when one was handed to the constructor; otherwise
@@ -104,18 +143,9 @@ bool App::start() {
                                          cfg_.node);
     node_->start();
 
-    switch (node_->inbox().load()) {
-        case mesh::MessageInbox::Load::Loaded:
-            LOG_INFO("messages: recovered %zu waiting for an app", node_->inbox().size());
-            break;
-        case mesh::MessageInbox::Load::Corrupt:
-            // Keep going with an empty queue rather than refusing to start —
-            // the radio is the point of the daemon — but move the unreadable
-            // file aside so the next save does not erase the evidence.
-            quarantine(cfg_.messages_path);
-            break;
-        case mesh::MessageInbox::Load::Missing:
-            break;
+    if (load_state(node_->inbox(), cfg_.messages_path, "messages") ==
+        mesh::LoadResult::Loaded) {
+        LOG_INFO("messages: recovered %zu waiting for an app", node_->inbox().size());
     }
 
     state_ = std::make_unique<mesh::StateWriter>(loop_, *contacts_, *channels_,

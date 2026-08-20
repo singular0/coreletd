@@ -89,7 +89,7 @@ static void test_contact_store_roundtrip() {
     CHECK(!store.dirty());
 
     ContactStore reloaded(*self, path);
-    CHECK(reloaded.load());
+    CHECK(reloaded.load() == LoadResult::Loaded);
     CHECK_EQ(reloaded.size(), size_t {1});
 
     const Contact* got = reloaded.find(pub_b);
@@ -127,7 +127,7 @@ static void test_contact_flood_vs_zero_hop_path_survives_reload() {
     CHECK(store.save());
 
     ContactStore reloaded(*self, path);
-    CHECK(reloaded.load());
+    CHECK(reloaded.load() == LoadResult::Loaded);
 
     const Contact* d = reloaded.find(pub_b);
     const Contact* f = reloaded.find(pub_a);
@@ -161,7 +161,7 @@ static void test_contact_load_is_all_or_nothing() {
         out << pv::kPubB << "\t256\t0\t100\t100\t0\t0\t-\tBad\n";
     }
 
-    CHECK(!store.load());
+    CHECK(store.load() == LoadResult::Corrupt);
     const Contact* still_there = store.find(retained_key);
     CHECK(still_there != nullptr);
     if (still_there) CHECK(still_there->name == "Retained");
@@ -173,7 +173,7 @@ static void test_contact_load_is_all_or_nothing() {
     {
         std::ofstream out(path, std::ios::trunc);
     }
-    CHECK(!store.load());
+    CHECK(store.load() == LoadResult::Corrupt);
     CHECK(store.find(retained_key) != nullptr);
     std::remove(path.c_str());
 }
@@ -192,7 +192,7 @@ static void test_channel_load_is_all_or_nothing() {
         out << "3\tabcd\tShort key\n";
     }
 
-    CHECK(!store.load());
+    CHECK(store.load() == LoadResult::Corrupt);
     CHECK(store.at(0) && store.at(0)->valid());
     CHECK(store.at(1) && store.at(1)->secret == retained.secret);
     CHECK(store.at(2) && !store.at(2)->valid());
@@ -205,7 +205,7 @@ static void test_channel_load_is_all_or_nothing() {
         out << "# coreletd channels v1\n";
         out << "2\t00112233445566778899aabbccddeeff\tOnly\n";
     }
-    CHECK(store.load());
+    CHECK(store.load() == LoadResult::Loaded);
     CHECK(store.at(0) && !store.at(0)->valid());
     CHECK(store.at(1) && !store.at(1)->valid());
     CHECK(store.at(2) && store.at(2)->valid());
@@ -862,7 +862,7 @@ static void test_inbox_survives_a_restart() {
     }
 
     MessageInbox reloaded(16, path);
-    CHECK(reloaded.load() == MessageInbox::Load::Loaded);
+    CHECK(reloaded.load() == LoadResult::Loaded);
     CHECK_EQ(reloaded.size(), size_t {2});
 
     auto first = reloaded.pop();
@@ -904,7 +904,7 @@ static void test_inbox_text_survives_separators() {
     }
 
     MessageInbox reloaded(16, path);
-    CHECK(reloaded.load() == MessageInbox::Load::Loaded);
+    CHECK(reloaded.load() == LoadResult::Loaded);
     CHECK_EQ(reloaded.size(), size_t {1});
     auto got = reloaded.pop();
     CHECK(got.has_value());
@@ -927,7 +927,7 @@ static void test_inbox_corrupt_file_is_reported() {
     }
     {
         MessageInbox inbox(16, path);
-        CHECK(inbox.load() == MessageInbox::Load::Corrupt);
+        CHECK(inbox.load() == LoadResult::Corrupt);
     }
 
     // Present but not ours at all.
@@ -937,7 +937,7 @@ static void test_inbox_corrupt_file_is_reported() {
     }
     {
         MessageInbox inbox(16, path);
-        CHECK(inbox.load() == MessageInbox::Load::Corrupt);
+        CHECK(inbox.load() == LoadResult::Corrupt);
     }
 
     // A sender key that is not a key.
@@ -948,14 +948,14 @@ static void test_inbox_corrupt_file_is_reported() {
     }
     {
         MessageInbox inbox(16, path);
-        CHECK(inbox.load() == MessageInbox::Load::Corrupt);
+        CHECK(inbox.load() == LoadResult::Corrupt);
     }
 
     std::remove(path.c_str());
 
     // Nothing written yet is a different answer from unreadable.
     MessageInbox fresh(16, path);
-    CHECK(fresh.load() == MessageInbox::Load::Missing);
+    CHECK(fresh.load() == LoadResult::Missing);
 }
 
 // A file written when the limit was higher keeps the newest, which is the end
@@ -973,7 +973,7 @@ static void test_inbox_load_respects_a_lower_limit() {
         }
     }
     MessageInbox reloaded(2, path);
-    CHECK(reloaded.load() == MessageInbox::Load::Loaded);
+    CHECK(reloaded.load() == LoadResult::Loaded);
     CHECK_EQ(reloaded.size(), size_t {2});
     auto m = reloaded.pop();
     CHECK(m.has_value());
@@ -989,13 +989,44 @@ static void test_inbox_without_a_path_stays_in_memory() {
     m.text = "held";
     CHECK(inbox.store(std::move(m)));
     CHECK_EQ(inbox.size(), size_t {1});
-    CHECK(inbox.load() == MessageInbox::Load::Missing);
+    CHECK(inbox.load() == LoadResult::Missing);
     CHECK(!inbox.save());
 }
 
 // Companion commands are answered before their state reaches disk, so that an
 // app working through its contact list one command at a time costs one durable
 // replacement rather than one per contact.
+// Atomic replacement makes a torn file impossible, but a bug in our own
+// serialisation would still write something unreadable over the only copy. The
+// save before it is kept so there is a generation to fall back to.
+static void test_a_save_keeps_the_previous_version() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self) return;
+    const std::string path = "/tmp/coreletd_test_backup_contacts";
+    const std::string backup = path + ".bak";
+    std::remove(path.c_str());
+    std::remove(backup.c_str());
+
+    ContactStore store(*self, path);
+    store.upsert(from_hex(pv::kPubB));
+    CHECK(store.save());
+    // Nothing to back up on a first save.
+    CHECK(!std::ifstream(backup).good());
+
+    store.upsert(from_hex(pv::kPubA));
+    CHECK(store.save());
+    CHECK(std::ifstream(backup).good());
+
+    // The backup is the store as it was one save ago, not as it is now.
+    ContactStore from_backup(*self, backup);
+    CHECK(from_backup.load() == LoadResult::Loaded);
+    CHECK_EQ(from_backup.size(), size_t {1});
+    CHECK(from_backup.find(from_hex(pv::kPubB)) != nullptr);
+
+    std::remove(path.c_str());
+    std::remove(backup.c_str());
+}
+
 static void test_state_writer_batches_deferred_saves() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
@@ -1034,11 +1065,11 @@ static void test_state_writer_batches_deferred_saves() {
     CHECK(writer.healthy());
 
     ContactStore reloaded(*self, contacts_path);
-    CHECK(reloaded.load());
+    CHECK(reloaded.load() == LoadResult::Loaded);
     CHECK(reloaded.find(from_hex(pv::kPubB)) != nullptr);
 
     ChannelStore reloaded_channels(channels_path);
-    CHECK(reloaded_channels.load());
+    CHECK(reloaded_channels.load() == LoadResult::Loaded);
     CHECK(reloaded_channels.at(1) && reloaded_channels.at(1)->valid());
 
     std::remove(contacts_path.c_str());
@@ -1115,6 +1146,7 @@ int main() {
     test_inbox_corrupt_file_is_reported();
     test_inbox_load_respects_a_lower_limit();
     test_inbox_without_a_path_stays_in_memory();
+    test_a_save_keeps_the_previous_version();
     test_state_writer_batches_deferred_saves();
     test_state_writer_reports_failed_writes();
     test_contact_limit_rejects_new_but_allows_update();

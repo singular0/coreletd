@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "crypto/identity.h"
+#include "mesh/record.h"
 #include "proto/payloads.h"
 #include "util/bytes.h"
 
@@ -97,7 +98,10 @@ public:
     const std::deque<Contact>& all() const { return contacts_; }
     size_t size() const { return contacts_.size(); }
 
-    bool load();
+    // Corrupt is not the same answer as Missing: a file that is there and
+    // cannot be parsed holds the keys that let us decrypt the mesh, so the
+    // caller must move it aside rather than let the next save replace it.
+    LoadResult load();
     // Clears dirty state only after the replacement file is safely installed.
     bool save();
     // Set when anything changed, so the daemon can persist lazily instead of

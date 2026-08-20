@@ -91,7 +91,7 @@ bool ChannelStore::save() {
         return false;
     }
     std::string error;
-    if (!durable_replace(tmp, path, error)) {
+    if (!durable_replace(tmp, path, error, /*keep_backup=*/true)) {
         LOG_ERROR("channels: %s", error.c_str());
         return false;
     }
@@ -99,11 +99,11 @@ bool ChannelStore::save() {
     return true;
 }
 
-bool ChannelStore::load() {
-    if (path_.empty()) return false;
+LoadResult ChannelStore::load() {
+    if (path_.empty()) return LoadResult::Missing;
     const std::string& path = path_;
     std::ifstream in(path);
-    if (!in) return false;
+    if (!in) return LoadResult::Missing;
 
     // Start empty so a saved file with slot 0 cleared stays cleared.
     std::vector<Channel> loaded(kMaxChannels);
@@ -122,7 +122,7 @@ bool ChannelStore::load() {
 
         auto fail = [&](const char* why) {
             LOG_ERROR("channels: %s:%d %s", path.c_str(), lineno, why);
-            return false;
+            return LoadResult::Corrupt;
         };
 
         size_t first_tab = line.find('\t');
@@ -153,16 +153,16 @@ bool ChannelStore::load() {
     }
     if (in.bad()) {
         LOG_ERROR("channels: read from %s failed", path.c_str());
-        return false;
+        return LoadResult::Corrupt;
     }
     if (!saw_header) {
         LOG_ERROR("channels: %s has no valid format header", path.c_str());
-        return false;
+        return LoadResult::Corrupt;
     }
 
     channels_ = std::move(loaded);
     dirty_ = false;
-    return true;
+    return LoadResult::Loaded;
 }
 
 }  // namespace clt::mesh

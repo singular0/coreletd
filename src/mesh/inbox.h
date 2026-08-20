@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 
+#include "mesh/record.h"
 #include "proto/payloads.h"
 #include "util/bytes.h"
 
@@ -63,10 +64,7 @@ public:
     // records that they existed, so this is the only evidence of the loss.
     uint32_t dropped() const { return dropped_; }
 
-    // Distinguishes a queue that was never written from one that is there but
-    // unreadable, so the caller can refuse to start rather than write over it.
-    enum class Load { Missing, Loaded, Corrupt };
-    Load load();
+    LoadResult load();
 
     bool save();
     bool dirty() const { return dirty_; }

@@ -5,6 +5,8 @@
 
 #include "util/bytes.h"
 
+#include "mesh/record.h"
+
 namespace clt::mesh {
 
 // The well-known MeshCore public channel. Every node ships with this in slot 0
@@ -42,7 +44,10 @@ public:
     // Every channel whose hash matches; the caller disambiguates by MAC.
     std::vector<std::pair<size_t, Channel*>> by_hash(uint8_t hash);
 
-    bool load();
+    // Corrupt is distinct from Missing for the same reason contacts is: a
+    // channel key that cannot be read is a channel whose traffic we can no
+    // longer decrypt, and the next save would erase it.
+    LoadResult load();
     // Clears dirty state only after the replacement file is safely installed.
     bool save();
     bool dirty() const { return dirty_; }

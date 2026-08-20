@@ -12,6 +12,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 
@@ -196,7 +197,7 @@ static void test_received_text_is_acked_on_air() {
     CHECK(self.has_value());
     if (!self) return;
     mesh::ContactStore reloaded(*self, contacts_path);
-    CHECK(reloaded.load());
+    CHECK(reloaded.load() == mesh::LoadResult::Loaded);
     const Bytes a_pub = from_hex(pv::kPubA);
     mesh::Contact* a = reloaded.find(a_pub);
     CHECK(a != nullptr);
@@ -266,6 +267,117 @@ static void test_message_received_offline_survives_a_restart() {
     client.send(Bytes {kCmdSyncNextMessage});
     CHECK(!client.await(kRespNoMoreMessages).empty());
 
+    app.request_stop();
+}
+
+// Counts the files a quarantine left behind, which is how the daemon says it
+// found a state file it could not read.
+static int quarantined(const std::string& dir, const std::string& stem) {
+    int n = 0;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        const std::string name = e.path().filename().string();
+        if (name.rfind(stem + ".corrupt-", 0) == 0) n++;
+    }
+    return n;
+}
+
+// A contacts file that cannot be parsed used to be indistinguishable from one
+// that was not there: both started an empty store, and the first save after
+// that replaced the damaged file with an empty one. The keys in it are what let
+// us decrypt anything the mesh sends us, so it has to be kept.
+static void test_corrupt_contacts_are_kept_not_overwritten() {
+    const std::string dir = fresh_state_dir("corruptcontacts");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string contacts_path = cfg.contacts_path;
+
+    const std::string garbage = "# coreletd contacts v1\nnot a contact record at all\n";
+    {
+        std::ofstream out(contacts_path, std::ios::trunc);
+        out << garbage;
+    }
+
+    ManualClock clock;
+    auto radio = std::make_unique<GatedRadio>();
+    GatedRadio* air = radio.get();
+    App app(std::move(cfg), std::move(radio), clock);
+    // The radio is the point of the daemon, so it still comes up.
+    CHECK(app.start());
+    air->set_ready(true);
+
+    // Exactly one copy of the damaged file was set aside, and it still holds
+    // what it held.
+    CHECK_EQ(quarantined(dir, "contacts"), 1);
+    for (const auto& e : std::filesystem::directory_iterator(dir)) {
+        if (e.path().filename().string().rfind("contacts.corrupt-", 0) != 0) continue;
+        std::ifstream in(e.path());
+        std::string kept((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(kept == garbage);
+    }
+
+    // And a save afterwards writes a fresh file rather than failing.
+    air->inject(from_hex(pv::kAdvertPacket));
+    app.request_stop();
+
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivB));
+    CHECK(self.has_value());
+    if (!self) return;
+    mesh::ContactStore reloaded(*self, contacts_path);
+    CHECK(reloaded.load() == mesh::LoadResult::Loaded);
+    CHECK(reloaded.find(from_hex(pv::kPubA)) != nullptr);
+}
+
+// When the save before the damaged one is still there, the contact and its
+// shared secret come back — which the daemon demonstrates by decrypting a
+// message from that contact and acking it.
+static void test_corrupt_contacts_recover_from_the_backup() {
+    const std::string dir = fresh_state_dir("contactsbackup");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string contacts_path = cfg.contacts_path;
+    Config second = harness_config(dir);
+
+    // A first run learns A from its advert and writes it out on the way down.
+    {
+        ManualClock clock;
+        auto radio = std::make_unique<GatedRadio>();
+        GatedRadio* air = radio.get();
+        App app(std::move(cfg), std::move(radio), clock);
+        CHECK(app.start());
+        air->set_ready(true);
+        air->inject(from_hex(pv::kAdvertPacket));
+        app.request_stop();
+    }
+
+    // That good file becomes the backup, and the live one is destroyed.
+    std::error_code ec;
+    std::filesystem::copy_file(contacts_path, contacts_path + ".bak",
+                               std::filesystem::copy_options::overwrite_existing, ec);
+    CHECK(!ec);
+    {
+        std::ofstream out(contacts_path, std::ios::trunc);
+        out << "wreckage\n";
+    }
+
+    ManualClock clock;
+    auto radio = std::make_unique<GatedRadio>();
+    GatedRadio* air = radio.get();
+    App app(std::move(second), std::move(radio), clock);
+    CHECK(app.start());
+    air->set_ready(true);
+    CHECK_EQ(quarantined(dir, "contacts"), 1);
+
+    // The proof that the contact really came back: a message from A decrypts,
+    // which needs its public key, and is acked.
+    air->inject(from_hex(pv::kTextPacket));
+    CHECK_EQ(air->send_count(), size_t {1});
+    auto sent = proto::Packet::decode(air->last_sent());
+    CHECK(sent.has_value());
+    if (sent) {
+        CHECK(sent->type == proto::PayloadType::Ack);
+        CHECK_BYTES(sent->payload, from_hex(pv::kTextAckHash));
+    }
     app.request_stop();
 }
 
@@ -398,6 +510,8 @@ int main() {
 
     test_received_text_is_acked_on_air();
     test_message_received_offline_survives_a_restart();
+    test_corrupt_contacts_are_kept_not_overwritten();
+    test_corrupt_contacts_recover_from_the_backup();
     test_companion_app_round_trip();
     test_pushes_wait_for_app_start();
 

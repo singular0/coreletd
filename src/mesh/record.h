@@ -12,6 +12,13 @@
 
 namespace clt::mesh {
 
+// What a store found when it went to read its file. The distinction matters:
+// nothing written yet is a normal first run, but a file that is there and
+// cannot be parsed must not be read as empty — the next save would replace it,
+// and the contacts or channels it held are what let us decrypt the mesh.
+enum class LoadResult { Missing, Loaded, Corrupt };
+
+
 // Splits into exactly `count` fields. A line with too few or too many is
 // rejected rather than silently padded, because a short record means the file
 // is from a different version or was truncated mid-write.

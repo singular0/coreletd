@@ -49,8 +49,8 @@ std::string parent_directory(const std::string& path) {
 
 }  // namespace
 
-bool durable_replace(const std::string& tmp_path, const std::string& path,
-                     std::string& error) {
+bool durable_replace(const std::string& tmp_path, const std::string& path, std::string& error,
+                     bool keep_backup) {
     error.clear();
 
     int file_flags = O_WRONLY;
@@ -63,6 +63,17 @@ bool durable_replace(const std::string& tmp_path, const std::string& path,
         return false;
     }
     if (!sync_and_close(tmp_fd, tmp_path, error)) return false;
+
+    if (keep_backup) {
+        std::string backup = path + ".bak";
+        ::unlink(backup.c_str());
+        // ENOENT just means there is nothing to back up yet. Any other failure
+        // is worth saying, but not worth refusing the write over: a save we
+        // skipped is a guaranteed loss, a missing backup only a possible one.
+        if (::link(path.c_str(), backup.c_str()) != 0 && errno != ENOENT) {
+            LOG_WARN("cannot keep a backup of %s: %s", path.c_str(), std::strerror(errno));
+        }
+    }
 
     int rc;
     do {

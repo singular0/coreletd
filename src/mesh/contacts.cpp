@@ -175,7 +175,7 @@ bool ContactStore::save() {
         return false;
     }
     std::string error;
-    if (!durable_replace(tmp, path, error)) {
+    if (!durable_replace(tmp, path, error, /*keep_backup=*/true)) {
         LOG_ERROR("contacts: %s", error.c_str());
         return false;
     }
@@ -183,11 +183,11 @@ bool ContactStore::save() {
     return true;
 }
 
-bool ContactStore::load() {
-    if (path_.empty()) return false;
+LoadResult ContactStore::load() {
+    if (path_.empty()) return LoadResult::Missing;
     const std::string& path = path_;
     std::ifstream in(path);
-    if (!in) return false;
+    if (!in) return LoadResult::Missing;
 
     std::deque<Contact> loaded;
     std::string line;
@@ -203,7 +203,7 @@ bool ContactStore::load() {
 
         auto fail = [&](const char* why) {
             LOG_ERROR("contacts: %s:%d %s", path.c_str(), lineno, why);
-            return false;
+            return LoadResult::Corrupt;
         };
 
         std::vector<std::string_view> fields;
@@ -253,17 +253,17 @@ bool ContactStore::load() {
     }
     if (in.bad()) {
         LOG_ERROR("contacts: read from %s failed", path.c_str());
-        return false;
+        return LoadResult::Corrupt;
     }
     if (!saw_header) {
         LOG_ERROR("contacts: %s has no valid format header", path.c_str());
-        return false;
+        return LoadResult::Corrupt;
     }
 
     contacts_ = std::move(loaded);
     dirty_ = false;
     LOG_INFO("contacts: loaded %zu from %s", contacts_.size(), path.c_str());
-    return true;
+    return LoadResult::Loaded;
 }
 
 }  // namespace clt::mesh

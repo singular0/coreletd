@@ -88,7 +88,7 @@ bool MessageInbox::save() {
         return false;
     }
     std::string error;
-    if (!durable_replace(tmp, path, error)) {
+    if (!durable_replace(tmp, path, error, /*keep_backup=*/true)) {
         LOG_ERROR("messages: %s", error.c_str());
         return false;
     }
@@ -96,11 +96,11 @@ bool MessageInbox::save() {
     return true;
 }
 
-MessageInbox::Load MessageInbox::load() {
-    if (path_.empty()) return Load::Missing;
+LoadResult MessageInbox::load() {
+    if (path_.empty()) return LoadResult::Missing;
     const std::string& path = path_;
     std::ifstream in(path);
-    if (!in) return Load::Missing;
+    if (!in) return LoadResult::Missing;
 
     std::deque<StoredMessage> loaded;
     std::string line;
@@ -116,7 +116,7 @@ MessageInbox::Load MessageInbox::load() {
 
         auto fail = [&](const char* why) {
             LOG_ERROR("messages: %s:%d %s", path.c_str(), lineno, why);
-            return Load::Corrupt;
+            return LoadResult::Corrupt;
         };
 
         std::vector<std::string_view> fields;
@@ -162,7 +162,7 @@ MessageInbox::Load MessageInbox::load() {
 
     if (!saw_header) {
         LOG_ERROR("messages: %s has no version header", path.c_str());
-        return Load::Corrupt;
+        return LoadResult::Corrupt;
     }
     // A file written by a larger limit than we run with now: keep the newest,
     // which is the same end store() keeps.
@@ -173,7 +173,7 @@ MessageInbox::Load MessageInbox::load() {
 
     messages_ = std::move(loaded);
     dirty_ = false;
-    return Load::Loaded;
+    return LoadResult::Loaded;
 }
 
 }  // namespace clt::mesh

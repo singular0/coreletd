@@ -10,6 +10,7 @@
 #include <limits>
 #include <variant>
 
+#include "proto/payloads.h"
 #include "util/ini.h"
 
 namespace clt {
@@ -290,6 +291,31 @@ bool Config::load(const std::string& path, std::string& error) {
     if (node.has_location) {
         node.lat_e6 = static_cast<int32_t>(std::llround(raw.lat * 1000000.0));
         node.lon_e6 = static_cast<int32_t>(std::llround(raw.lon * 1000000.0));
+    }
+
+    // The advert has to fit in the 32 bytes MeshCore verifies, and the budget
+    // depends on whether a position is being advertised, so this cannot be a
+    // range on the setting itself. Refuse rather than truncate: the failure
+    // mode otherwise is silence at both ends — peers log a forged signature and
+    // drop us, and nothing here says why nobody ever answers.
+    // Not reachable from the file — an empty value falls back to the default —
+    // but the invariant is worth holding anyway: BaseChatMesh::onAdvertRecv
+    // discards any advert without a name, so a nameless node is invisible to
+    // chat clients even when its signature verifies.
+    if (node.name.empty()) {
+        error = "node.advert_name must not be empty — MeshCore clients ignore adverts with no name";
+        return false;
+    }
+    {
+        const size_t overhead = 1 + (node.has_location ? 8 : 0);  // flags, lat+lon
+        const size_t budget = proto::kMaxAdvertAppDataSize - overhead;
+        if (node.name.size() > budget) {
+            error = "node.advert_name is " + std::to_string(node.name.size()) +
+                    " bytes; the advert only carries " + std::to_string(budget) +
+                    (node.has_location ? " once node.lat/node.lon are set" : "") +
+                    ", and a longer one fails signature verification on every MeshCore node";
+            return false;
+        }
     }
 
     for (const auto& key : ini.unread_keys())

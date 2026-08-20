@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "daemon/config.h"
+#include "proto/payloads.h"
 #include "tests/test_util.h"
 #include "util/ini.h"
 
@@ -222,6 +223,14 @@ static void check_config_rejected(const std::string& setting) {
     CHECK(!error.empty());
 }
 
+static void check_config_accepted(const std::string& setting) {
+    std::string path =
+        write_temp("[radio]\nlora_freq = 869.618\n" + as_sectioned_setting(setting));
+    Config cfg;
+    std::string error;
+    CHECK(cfg.load(path, error));
+}
+
 static void test_config_rejects_malformed_and_unsafe_values() {
     // Malformed values must fail startup instead of silently selecting the
     // defaults. Cover each parser kind used by Config.
@@ -258,6 +267,61 @@ static void test_config_rejects_malformed_and_unsafe_values() {
     check_config_rejected("node.lat = -90.1");
     check_config_rejected("node.lat = nan");
     check_config_rejected("node.lon = 180.1");
+}
+
+// The advert is signed over all of the appdata and verified over the first 32
+// bytes, so a name that pushes past that is dropped by every MeshCore node —
+// silently, at both ends. The ceiling depends on whether a position is being
+// advertised, which is why it cannot be a range on the setting itself.
+static void test_advert_name_must_fit_the_advert() {
+    check_config_rejected("node.advert_name = " + std::string(32, 'x'));
+    // 31 is the last one that fits without a position.
+    check_config_accepted("node.advert_name = " + std::string(31, 'x'));
+
+    // With lat/lon the eight bytes they cost come out of the same budget.
+    auto with_location = [](size_t name_len) {
+        return "[radio]\nlora_freq = 869.618\n[node]\nlat = 51.5\nlon = -0.1\nadvert_name = " +
+               std::string(name_len, 'x') + "\n";
+    };
+    {
+        std::string path = write_temp(with_location(24));
+        Config cfg;
+        std::string error;
+        CHECK(!cfg.load(path, error));
+    }
+    {
+        std::string path = write_temp(with_location(23));
+        Config cfg;
+        std::string error;
+        CHECK(cfg.load(path, error));
+    }
+
+    // An empty value is not a way to end up nameless: the ini falls back to the
+    // default. Worth pinning, because a nameless node is invisible to chat
+    // clients even when its signature verifies.
+    {
+        std::string path = write_temp("[radio]\nlora_freq = 869.618\n[node]\nadvert_name =\n");
+        Config cfg;
+        std::string error;
+        CHECK(cfg.load(path, error));
+        CHECK(!cfg.node.name.empty());
+    }
+}
+
+// Whatever the config allows, the encoded appdata has to fit what MeshCore
+// verifies — including a maximal one.
+static void test_maximal_appdata_fits_what_meshcore_verifies() {
+    proto::AdvertAppData app;
+    app.flags = proto::kAdvTypeChat | proto::kAdvHasLocation | proto::kAdvHasName;
+    app.lat_e6 = 51500000;
+    app.lon_e6 = -100000;
+    app.name = std::string(23, 'x');
+    CHECK_EQ(app.encode().size(), proto::kMaxAdvertAppDataSize);
+
+    proto::AdvertAppData no_location;
+    no_location.flags = proto::kAdvTypeChat | proto::kAdvHasName;
+    no_location.name = std::string(31, 'x');
+    CHECK_EQ(no_location.encode().size(), proto::kMaxAdvertAppDataSize);
 }
 
 static void test_config_accepts_valid_boundaries() {
@@ -372,6 +436,8 @@ int main() {
     test_retry_interval();
     test_companion_interfaces();
     test_config_rejects_malformed_and_unsafe_values();
+    test_advert_name_must_fit_the_advert();
+    test_maximal_appdata_fits_what_meshcore_verifies();
     test_config_accepts_valid_boundaries();
     test_config_requires_sections();
     test_shipped_ini_matches_the_settings_table();

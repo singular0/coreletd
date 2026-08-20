@@ -13,6 +13,14 @@ namespace clt::proto {
 // Node advertisement
 // ---------------------------------------------------------------------------
 
+// MeshCore caps appdata at MAX_ADVERT_DATA_SIZE on the way out, and clamps to
+// the same 32 bytes again before it verifies the signature on the way in. An
+// advert whose appdata is longer is signed by us over all of it and verified by
+// them over the first 32 bytes, so the signature cannot match — every MeshCore
+// node logs a forged signature and drops it, and we simply never appear on the
+// mesh. Packet::valid() allows far more than this, so nothing else stops it.
+inline constexpr size_t kMaxAdvertAppDataSize = 32;
+
 // The low nibble of the appdata flags is a node *type*, not a bit field:
 // 0x03 (room server) is a value, not chat|repeater.
 // Plain constants rather than two enums: the node type and the presence flags

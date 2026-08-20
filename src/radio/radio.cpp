@@ -14,7 +14,7 @@ uint32_t Radio::airtime_ms(size_t bytes) const {
     const bool de = p.low_data_rate_optimize();
     const double bw_hz = p.bw_khz * 1000.0;
     const double t_sym = std::pow(2.0, p.sf) / bw_hz;  // seconds
-    const double t_preamble = (p.preamble + 4.25) * t_sym;
+    const double t_preamble = (p.preamble_symbols() + p.sfd_symbols()) * t_sym;
 
     const int cr = p.cr >= 5 && p.cr <= 8 ? p.cr - 4 : 4;  // 4/(4+cr)
     const double numerator = 8.0 * bytes - 4.0 * p.sf + 28 + 16 /* CRC on */;

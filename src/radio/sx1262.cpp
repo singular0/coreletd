@@ -51,6 +51,7 @@ constexpr uint16_t kRegLoRaSyncWordMsb = 0x0740;
 constexpr uint16_t kRegRxGain = 0x08AC;
 constexpr uint16_t kRegOcpConfig = 0x08E7;
 constexpr uint16_t kRegTxClampConfig = 0x08D8;
+constexpr uint16_t kRegSensitivityConfig = 0x0889;
 
 // IRQ bits
 constexpr uint16_t kIrqTxDone = 0x0001;
@@ -585,6 +586,23 @@ bool Sx1262::configure(std::string& error) {
     if (!write_register(kRegTxClampConfig, ByteView(&clamp, 1)))
         return fail_with("write TX clamp configuration");
 
+    // Errata 15.1, the other half of the pair: the receiver needs bit 2 of the
+    // sensitivity register cleared at 500 kHz and set everywhere else. The
+    // power-on state is already right for every other bandwidth, but lora_bw =
+    // 500 is a value the config accepts, and RadioLib applies this for MeshCore
+    // (SX126x::fixSensitivity). Bandwidth is fixed at configure time here, so
+    // this is the only place it has to be applied.
+    uint8_t sensitivity = 0;
+    if (!read_register(kRegSensitivityConfig, ByteSpan(&sensitivity, 1)))
+        return fail_with("read sensitivity configuration");
+    if (std::fabs(params_.bw_khz - 500.0) <= 0.001) {
+        sensitivity &= static_cast<uint8_t>(~0x04);
+    } else {
+        sensitivity |= 0x04;
+    }
+    if (!write_register(kRegSensitivityConfig, ByteView(&sensitivity, 1)))
+        return fail_with("write sensitivity configuration");
+
     // Over-current protection, in 2.5 mA steps.
     uint8_t ocp = static_cast<uint8_t>(std::min(params_.current_limit_ma / 2.5, 63.0));
     if (!write_register(kRegOcpConfig, ByteView(&ocp, 1)))
@@ -651,8 +669,8 @@ bool Sx1262::set_modulation() {
 
 bool Sx1262::set_packet_params(uint8_t payload_len) {
     Bytes args {
-        static_cast<uint8_t>(params_.preamble >> 8),
-        static_cast<uint8_t>(params_.preamble),
+        static_cast<uint8_t>(params_.preamble_symbols() >> 8),
+        static_cast<uint8_t>(params_.preamble_symbols()),
         0x00,         // explicit (variable length) header
         payload_len,
         0x01,         // CRC on
@@ -710,7 +728,7 @@ bool Sx1262::channel_busy() {
     // most of them.
     const uint32_t deadline = (irq & kIrqHeaderValid)
                                   ? airtime_ms(kMaxPayloadSize)
-                                  : symbols_ms(params_.preamble + kHeaderSymbols);
+                                  : symbols_ms(params_.preamble_symbols() + kHeaderSymbols);
     if (now - rx_since_ms_ > deadline) {
         LOG_TRACE("sx1262: reception flag stale after %u ms, clearing", now - rx_since_ms_);
         constexpr uint16_t stale = kIrqPreambleDetected | kIrqHeaderValid;

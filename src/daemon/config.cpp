@@ -156,7 +156,9 @@ std::vector<Setting> settings(Config& cfg, Raw& raw) {
         Int("radio.lora_sf", cfg.radio.sf, 5, 12),
         Int("radio.lora_cr", cfg.radio.cr, 5, 8),
         Int("radio.lora_tx_power", cfg.radio.tx_power_dbm, -9, 22),
-        Int("radio.lora_preamble", cfg.radio.preamble, 1, kMaxU16),
+        // 0 is "derive it from the spreading factor", which is what MeshCore
+        // does; a value is an override for a mesh that agreed on another.
+        Int("radio.lora_preamble", cfg.radio.preamble, 0, kMaxU16),
         Int("radio.lora_sync_word", cfg.radio.sync_word, 0, kMaxU8),
         Real("radio.duty_cycle", cfg.radio.duty_cycle_pct, valid_duty_cycle,
              "greater than 0 and less than 100 percent"),

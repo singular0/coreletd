@@ -27,10 +27,16 @@ struct RadioParams {
     double freq_mhz = 0.0;
     double bw_khz = 62.5;
     uint8_t sf = 8;
-    uint8_t cr = 8;  // coding rate denominator: 8 == 4/8
+    // Coding rate denominator: 5 == 4/5, which is MeshCore's own default. The
+    // explicit header carries it, so a different value still interoperates —
+    // it just costs airtime, here and on every repeater that forwards it.
+    uint8_t cr = 5;
     int tx_power_dbm = 22;
     uint8_t sync_word = 0x12;  // MeshCore uses the "private" LoRa sync word
-    uint16_t preamble = 16;
+    // 0 means "whatever the spreading factor calls for", which is what a
+    // MeshCore neighbour uses; see preamble_symbols(). A configured value is an
+    // override for a mesh that has agreed on something else.
+    uint16_t preamble = 0;
     double tcxo_voltage = 1.8;  // 0 == module has no TCXO
     bool dio2_as_rf_switch = true;
     bool rx_boosted_gain = true;
@@ -48,6 +54,20 @@ struct RadioParams {
         if (sf < 5 || bw_khz <= 0) return false;
         return static_cast<double>(uint32_t {1} << sf) / bw_khz >= 16.0;
     }
+
+    // Preamble length in symbols. MeshCore derives it from the spreading factor
+    // rather than fixing it (RadioLibWrapper::preambleLengthForSF), doubling it
+    // at SF8 and below where a longer preamble buys reliability. Both ends
+    // still decode a mismatch — the receiver only needs to catch enough of the
+    // preamble to sync — but transmitting 16 into a mesh that transmits 32 at
+    // our own default SF8 gives away half the sync margin our neighbours have.
+    uint16_t preamble_symbols() const { return preamble ? preamble : (sf <= 8 ? 32 : 16); }
+
+    // Symbols between the preamble and the header: the sync word plus the start
+    // frame delimiter. 4.25 at SF7 and above, 6.25 at SF5 and SF6, which the
+    // config permits and which the airtime model has to know about because the
+    // duty-cycle budget is computed from it.
+    double sfd_symbols() const { return sf <= 6 ? 6.25 : 4.25; }
 };
 
 class Radio {

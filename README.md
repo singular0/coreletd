@@ -197,7 +197,8 @@ The file is divided into `[radio]`, `[hardware]`, `[node]`, `[companion]`, `[sto
 `[logging]` sections. **`lora_freq` in `[radio]` is required and has no default.** Which band you may
 transmit on is a legal question, not a technical one, so the daemon refuses to start until you
 answer it — `869.618` for EU868, `910.525` for US915. Every node on a mesh must also agree on
-`lora_bw`, `lora_sf` and `lora_cr`; the shipped values are MeshCore's standard settings.
+`lora_bw` and `lora_sf`; the shipped values are MeshCore's standard settings. `lora_cr` is carried in
+each packet's header, so it only costs airtime rather than breaking the link.
 
 Worth setting while you are in there: `advert_name` in `[node]` (what other nodes see), `lat` / `lon`
 if you want to publish a position, and `duty_cycle` in `[radio]` for your band. The file documents
@@ -288,7 +289,8 @@ it is cleared after calibration. If it is *still* reported after that, `lora_tcx
 does not match your board.
 
 **The daemon starts but hears nothing.** Air settings must match the rest of the mesh exactly —
-frequency, bandwidth, spreading factor and coding rate. A mismatch is silence, not an error.
+frequency, bandwidth and spreading factor. A mismatch is silence, not an error. Coding rate is the
+exception: it rides in the packet header, so a node using a different one is still heard.
 
 **`EBUSY` opening the GPIO chip.** Something else holds the lines; usually `meshtasticd`, sometimes
 a `gpioset` you left running, sometimes an earlier coreletd that did not exit.

@@ -139,6 +139,11 @@ mirrors them in its `protocol/protocol.h`). Never renumber; append only.
 - **`XOSC_START_ERR` (`0x0020`) at power-up is not a fault.** The chip latches it because it starts
   its oscillator before DIO3 is configured to drive the TCXO; calibration clears it. Still reported
   afterwards means `[hardware] lora_tcxo` genuinely doesn't match the board.
+- **The preamble is derived from the spreading factor, not chosen.** RadioLib's
+  `preambleLengthForSF()` gives MeshCore 32 symbols at SF8 and below and 16 above, so
+  `[radio] lora_preamble` is an override and unset means the rule. The two datasheet errata are a
+  pair: 15.2's TX clamp at `0x08D8`, and 15.1's receiver sensitivity bit at `0x0889`, which is only
+  wrong at `lora_bw = 500` but has to be written because the validator accepts that.
 - DIO2 drives the RF switch, DIO3 the TCXO at 1.8 V, and chip select is the kernel's SPI1-CE0, which
   is why `[hardware] lora_nss_pin` is unset.
 

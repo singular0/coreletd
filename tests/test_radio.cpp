@@ -91,7 +91,7 @@ static void test_airtime_follows_the_ldro_bit() {
 
     // The same settings costed the old way, with the DE term forced off.
     const double t_sym = std::pow(2.0, slow.sf) / (slow.bw_khz * 1000.0);
-    const double t_preamble = (slow.preamble + 4.25) * t_sym;
+    const double t_preamble = (slow.preamble_symbols() + 4.25) * t_sym;
     const double numerator = 8.0 * 32 - 4.0 * slow.sf + 28 + 16;
     const double n_no_de = 8 + std::ceil(numerator / (4.0 * slow.sf)) * (4 + (slow.cr - 4));
     const auto without_de = static_cast<uint32_t>(std::ceil((t_preamble + n_no_de * t_sym) * 1000.0));
@@ -106,10 +106,81 @@ static void test_airtime_follows_the_ldro_bit() {
     CHECK(f.airtime_ms(32) > 0);
 }
 
+// MeshCore derives the preamble from the spreading factor and doubles it at
+// SF8 and below (RadioLibWrapper::preambleLengthForSF). Our own default is SF8,
+// exactly the branch it doubles, so a fixed 16 transmitted half the sync margin
+// every neighbour was giving us.
+static void test_preamble_follows_the_spreading_factor() {
+    radio::RadioParams p;
+    for (uint8_t sf = 5; sf <= 12; sf++) {
+        p.sf = sf;
+        CHECK_EQ(p.preamble_symbols(), uint16_t(sf <= 8 ? 32 : 16));
+    }
+
+    // The shipped default is SF8, so 32 is what the daemon transmits unasked.
+    radio::RadioParams def;
+    CHECK_EQ(def.preamble_symbols(), uint16_t {32});
+
+    // A configured value overrides the rule at every spreading factor: a mesh
+    // that agreed on something else has to be able to say so.
+    p.preamble = 8;
+    for (uint8_t sf = 5; sf <= 12; sf++) {
+        p.sf = sf;
+        CHECK_EQ(p.preamble_symbols(), uint16_t {8});
+    }
+}
+
+// The sync word and start frame delimiter are 4.25 symbols at SF7 and above and
+// 6.25 at SF5 and SF6, which the config permits. The duty-cycle budget exists
+// to keep transmissions inside a legal limit, so it cannot be computed from a
+// model that undercounts two of the settings an operator can select.
+static void test_airtime_uses_the_longer_sfd_at_sf5_and_sf6() {
+    for (uint8_t sf = 5; sf <= 12; sf++) {
+        radio::RadioParams p;
+        p.sf = sf;
+        CHECK_EQ(p.sfd_symbols(), sf <= 6 ? 6.25 : 4.25);
+    }
+
+    // Two symbols of difference, and nothing else: same SF, same bandwidth,
+    // same preamble, so the gap between the model and the old one is exactly
+    // the SFD term.
+    radio::RadioParams p;
+    p.sf = 6;
+    p.bw_khz = 62.5;
+    ParamsOnlyRadio r(p);
+
+    const double t_sym = std::pow(2.0, p.sf) / (p.bw_khz * 1000.0);
+    const double old_preamble = (p.preamble_symbols() + 4.25) * t_sym;
+    const double numerator = 8.0 * 32 - 4.0 * p.sf + 28 + 16;
+    const double n_payload = 8 + std::ceil(numerator / (4.0 * p.sf)) * (4 + (p.cr - 4));
+    const auto old_ms =
+        static_cast<uint32_t>(std::ceil((old_preamble + n_payload * t_sym) * 1000.0));
+
+    const double sfd_preamble = (p.preamble_symbols() + 6.25) * t_sym;
+    const auto want =
+        static_cast<uint32_t>(std::ceil((sfd_preamble + n_payload * t_sym) * 1000.0));
+    CHECK_EQ(r.airtime_ms(32), want);
+    CHECK(want > old_ms);
+
+    // SF7 and up are unchanged, so the budget for the shipped settings is what
+    // it always was.
+    radio::RadioParams fast;
+    fast.sf = 7;
+    ParamsOnlyRadio f(fast);
+    const double fast_sym = std::pow(2.0, fast.sf) / (fast.bw_khz * 1000.0);
+    const double fast_preamble = (fast.preamble_symbols() + 4.25) * fast_sym;
+    const double fast_num = 8.0 * 32 - 4.0 * fast.sf + 28 + 16;
+    const double fast_payload = 8 + std::ceil(fast_num / (4.0 * fast.sf)) * (4 + (fast.cr - 4));
+    CHECK_EQ(f.airtime_ms(32),
+             static_cast<uint32_t>(std::ceil((fast_preamble + fast_payload * fast_sym) * 1000.0)));
+}
+
 int main() {
     test_ldro_matches_the_symbol_time_threshold();
     test_the_settings_that_used_to_mismatch();
     test_airtime_follows_the_ldro_bit();
+    test_preamble_follows_the_spreading_factor();
+    test_airtime_uses_the_longer_sfd_at_sf5_and_sf6();
 
     return finish("radio");
 }

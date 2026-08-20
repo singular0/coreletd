@@ -30,6 +30,9 @@ public:
         bool repeat = false;
         uint8_t max_hops = 32;
         uint32_t message_queue_limit = 256;
+        // Where the received-message queue is persisted. Empty keeps it in
+        // memory, which is what the tests that do not care about restarts use.
+        std::string messages_path;
         uint32_t pending_send_limit = 64;
     };
 
@@ -79,6 +82,8 @@ public:
 
     // --- inbound message queue -----------------------------------------
     bool has_messages() const { return !inbox_.empty(); }
+    // StateWriter needs it to persist pops; App needs it to load at startup.
+    MessageInbox& inbox() { return inbox_; }
     std::optional<StoredMessage> pop_message() { return inbox_.pop(); }
 
     // --- introspection --------------------------------------------------

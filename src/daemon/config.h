@@ -38,6 +38,7 @@ struct Config {
     std::string identity_path;
     std::string contacts_path;
     std::string channels_path;
+    std::string messages_path;
 
     radio::RadioParams radio;
     SpiConfig spi;

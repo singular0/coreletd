@@ -5,6 +5,7 @@
 #include "daemon/eventloop.h"
 #include "mesh/channels.h"
 #include "mesh/contacts.h"
+#include "mesh/inbox.h"
 
 namespace clt::mesh {
 
@@ -26,7 +27,7 @@ public:
     static constexpr uint32_t kSweepMs = 60000;
 
     StateWriter(EventLoop& loop, ContactStore& contacts, ChannelStore& channels,
-                uint32_t coalesce_ms = kCoalesceMs);
+                MessageInbox& inbox, uint32_t coalesce_ms = kCoalesceMs);
 
     // Arms the periodic sweep. Nothing is written before this is called.
     void start();
@@ -49,6 +50,9 @@ private:
     EventLoop& loop_;
     ContactStore& contacts_;
     ChannelStore& channels_;
+    // Only pops reach the writer this way. Stores commit themselves, because
+    // an ack goes out immediately after one.
+    MessageInbox& inbox_;
     uint32_t coalesce_ms_;
 
     // Both callbacks capture `this`, so holding the registrations here is what

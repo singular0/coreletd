@@ -203,6 +203,72 @@ static void test_received_text_is_acked_on_air() {
     if (a) CHECK(a->name == pv::kNameA);
 }
 
+// The radio keeps running with no app attached, and the ack the daemon sent
+// told the sender to stop retrying. So a message received while nobody was
+// collecting has to still be there after a restart: there is nobody left to
+// ask for it again.
+static void test_message_received_offline_survives_a_restart() {
+    const std::string dir = fresh_state_dir("inboxrestart");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string socket_path = cfg.companion.socket_path;
+    Config second = harness_config(dir);
+
+    {
+        ManualClock clock;
+        auto radio = std::make_unique<GatedRadio>();
+        GatedRadio* air = radio.get();
+        App app(std::move(cfg), std::move(radio), clock);
+        CHECK(app.start());
+        air->set_ready(true);
+
+        // No companion app ever connects during this run.
+        air->inject(from_hex(pv::kAdvertPacket));
+        air->inject(from_hex(pv::kTextPacket));
+
+        // The ack went out, which is the promise that makes losing it a fault.
+        CHECK_EQ(air->send_count(), size_t {1});
+        auto sent = proto::Packet::decode(air->last_sent());
+        CHECK(sent.has_value());
+        if (sent) CHECK(sent->type == proto::PayloadType::Ack);
+
+        app.request_stop();
+    }
+
+    // A second daemon over the same state directory, as a restart would be.
+    ManualClock clock;
+    auto radio = std::make_unique<GatedRadio>();
+    App app(std::move(second), std::move(radio), clock);
+    CHECK(app.start());
+
+    Client client(app, socket_path);
+    CHECK(client.connected());
+    if (!client.connected()) return;
+
+    client.send(Bytes {kCmdAppStart, 1, 0, 0, 0, 0, 0, 't', 'e', 's', 't'});
+    CHECK(!client.await(kRespSelfInfo).empty());
+
+    client.send(Bytes {kCmdSyncNextMessage});
+    Bytes msg = client.await(kRespContactMsgRecvV3);
+    CHECK(!msg.empty());
+    if (msg.empty()) return;
+
+    // snr(1) reserved(2) pubkey(6) path_len(1) txt_type(1) timestamp(4), then
+    // the text the sender wrote.
+    const size_t kTextAt = 1 + 1 + 2 + 6 + 1 + 1 + 4;
+    CHECK(msg.size() > kTextAt);
+    if (msg.size() > kTextAt) {
+        std::string text(msg.begin() + kTextAt, msg.end());
+        CHECK(text == pv::kTextBody);
+    }
+
+    // And it is a pop, not a peek: the queue is empty behind it.
+    client.send(Bytes {kCmdSyncNextMessage});
+    CHECK(!client.await(kRespNoMoreMessages).empty());
+
+    app.request_stop();
+}
+
 // The external-client round trip, in-process: a client connects over the
 // default Unix transport, starts a session, sends a message and sees it
 // confirmed.
@@ -331,6 +397,7 @@ int main() {
     if (!crypto::init()) return 2;
 
     test_received_text_is_acked_on_air();
+    test_message_received_offline_survives_a_restart();
     test_companion_app_round_trip();
     test_pushes_wait_for_app_start();
 

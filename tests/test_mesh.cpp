@@ -821,6 +821,178 @@ static void test_inbox_drops_oldest_when_full() {
     CHECK(!inbox.pop().has_value());
 }
 
+static void test_inbox_eviction_is_counted() {
+    MessageInbox inbox(2);
+    for (int i = 0; i < 5; i++) {
+        StoredMessage m;
+        m.text = std::to_string(i);
+        inbox.store(std::move(m));
+    }
+    CHECK_EQ(inbox.size(), size_t {2});
+    // Nothing else records that the evicted three ever arrived.
+    CHECK_EQ(inbox.dropped(), uint32_t {3});
+}
+
+// An ack tells the sender to stop retrying, so a queue that does not survive a
+// restart loses mail with nobody left to ask for it again.
+static void test_inbox_survives_a_restart() {
+    const std::string path = "/tmp/coreletd_test_inbox_restart";
+    std::remove(path.c_str());
+
+    {
+        MessageInbox inbox(16, path);
+        StoredMessage direct;
+        direct.sender_pubkey = from_hex(pv::kPubB);
+        direct.timestamp = 1700000000;
+        direct.txt_type = proto::kTxtPlain;
+        direct.text = "first";
+        direct.snr_q4 = -20;
+        direct.path_len = 0xFF;
+        // store() commits on its own; nothing calls save() here on purpose.
+        CHECK(inbox.store(std::move(direct)));
+
+        StoredMessage group;
+        group.is_channel = true;
+        group.channel_index = 3;
+        group.timestamp = 1700000001;
+        group.text = "second";
+        group.snr_q4 = 40;
+        group.path_len = 2;
+        CHECK(inbox.store(std::move(group)));
+    }
+
+    MessageInbox reloaded(16, path);
+    CHECK(reloaded.load() == MessageInbox::Load::Loaded);
+    CHECK_EQ(reloaded.size(), size_t {2});
+
+    auto first = reloaded.pop();
+    CHECK(first.has_value());
+    if (first) {
+        CHECK(!first->is_channel);
+        CHECK(first->text == "first");
+        CHECK_BYTES(first->sender_pubkey, from_hex(pv::kPubB));
+        CHECK_EQ(first->timestamp, uint32_t {1700000000});
+        CHECK_EQ(first->snr_q4, int8_t {-20});
+        CHECK_EQ(first->path_len, uint8_t {0xFF});
+    }
+
+    auto second = reloaded.pop();
+    CHECK(second.has_value());
+    if (second) {
+        CHECK(second->is_channel);
+        CHECK(second->text == "second");
+        CHECK_EQ(second->channel_index, uint8_t {3});
+        CHECK_EQ(second->snr_q4, int8_t {40});
+        CHECK_EQ(second->path_len, uint8_t {2});
+    }
+    std::remove(path.c_str());
+}
+
+// Message text is whatever the sender typed, and the store is one record per
+// line, so a tab or a newline in a message must not be able to end the record.
+static void test_inbox_text_survives_separators() {
+    const std::string path = "/tmp/coreletd_test_inbox_text";
+    std::remove(path.c_str());
+    const std::string nasty = "line\tone\nline two\r\n# not a comment\ttrailing";
+
+    {
+        MessageInbox inbox(16, path);
+        StoredMessage m;
+        m.sender_pubkey = from_hex(pv::kPubB);
+        m.text = nasty;
+        CHECK(inbox.store(std::move(m)));
+    }
+
+    MessageInbox reloaded(16, path);
+    CHECK(reloaded.load() == MessageInbox::Load::Loaded);
+    CHECK_EQ(reloaded.size(), size_t {1});
+    auto got = reloaded.pop();
+    CHECK(got.has_value());
+    if (got) CHECK(got->text == nasty);
+    std::remove(path.c_str());
+}
+
+// A queue that cannot be parsed must be reported as such, not read as empty:
+// an empty read would be overwritten by the next save, taking the messages
+// with it.
+static void test_inbox_corrupt_file_is_reported() {
+    const std::string path = "/tmp/coreletd_test_inbox_corrupt";
+
+    // Truncated mid-record, which is what an interrupted write looks like if
+    // it ever reached the real file rather than the temporary one.
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# coreletd messages v1\n";
+        out << "direct\t" << pv::kPubB << "\t0\t1700000000\t0\t0\n";
+    }
+    {
+        MessageInbox inbox(16, path);
+        CHECK(inbox.load() == MessageInbox::Load::Corrupt);
+    }
+
+    // Present but not ours at all.
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "this is not a message queue\n";
+    }
+    {
+        MessageInbox inbox(16, path);
+        CHECK(inbox.load() == MessageInbox::Load::Corrupt);
+    }
+
+    // A sender key that is not a key.
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# coreletd messages v1\n";
+        out << "direct\tnothex\t0\t1700000000\t0\t0\t255\t6869\n";
+    }
+    {
+        MessageInbox inbox(16, path);
+        CHECK(inbox.load() == MessageInbox::Load::Corrupt);
+    }
+
+    std::remove(path.c_str());
+
+    // Nothing written yet is a different answer from unreadable.
+    MessageInbox fresh(16, path);
+    CHECK(fresh.load() == MessageInbox::Load::Missing);
+}
+
+// A file written when the limit was higher keeps the newest, which is the end
+// store() keeps when it evicts.
+static void test_inbox_load_respects_a_lower_limit() {
+    const std::string path = "/tmp/coreletd_test_inbox_limit";
+    std::remove(path.c_str());
+    {
+        MessageInbox inbox(16, path);
+        for (int i = 0; i < 5; i++) {
+            StoredMessage m;
+            m.sender_pubkey = from_hex(pv::kPubB);
+            m.text = std::to_string(i);
+            inbox.store(std::move(m));
+        }
+    }
+    MessageInbox reloaded(2, path);
+    CHECK(reloaded.load() == MessageInbox::Load::Loaded);
+    CHECK_EQ(reloaded.size(), size_t {2});
+    auto m = reloaded.pop();
+    CHECK(m.has_value());
+    if (m) CHECK(m->text == "3");
+    std::remove(path.c_str());
+}
+
+// A queue with no path is the in-memory one the narrower tests use, and it must
+// not pretend anything reached disk.
+static void test_inbox_without_a_path_stays_in_memory() {
+    MessageInbox inbox(4);
+    StoredMessage m;
+    m.text = "held";
+    CHECK(inbox.store(std::move(m)));
+    CHECK_EQ(inbox.size(), size_t {1});
+    CHECK(inbox.load() == MessageInbox::Load::Missing);
+    CHECK(!inbox.save());
+}
+
 // Companion commands are answered before their state reaches disk, so that an
 // app working through its contact list one command at a time costs one durable
 // replacement rather than one per contact.
@@ -835,9 +1007,10 @@ static void test_state_writer_batches_deferred_saves() {
     EventLoop loop(clock);
     ContactStore contacts(*self, contacts_path);
     ChannelStore channels(channels_path);
+    MessageInbox inbox;
     // The production coalescing window, which only virtual time makes cheap to
     // wait out.
-    StateWriter writer(loop, contacts, channels);
+    StateWriter writer(loop, contacts, channels, inbox);
 
     contacts.upsert(from_hex(pv::kPubB));
     writer.request_save();
@@ -881,7 +1054,8 @@ static void test_state_writer_reports_failed_writes() {
     EventLoop loop;
     ContactStore contacts(*self, "/nonexistent/coreletd/contacts");
     ChannelStore channels("/nonexistent/coreletd/channels");
-    StateWriter writer(loop, contacts, channels);
+    MessageInbox inbox;
+    StateWriter writer(loop, contacts, channels, inbox);
     CHECK(writer.healthy());
 
     contacts.upsert(from_hex(pv::kPubB));
@@ -935,6 +1109,12 @@ int main() {
     test_received_message_marks_store_dirty();
     test_direct_ack_marks_store_dirty();
     test_inbox_drops_oldest_when_full();
+    test_inbox_eviction_is_counted();
+    test_inbox_survives_a_restart();
+    test_inbox_text_survives_separators();
+    test_inbox_corrupt_file_is_reported();
+    test_inbox_load_respects_a_lower_limit();
+    test_inbox_without_a_path_stays_in_memory();
     test_state_writer_batches_deferred_saves();
     test_state_writer_reports_failed_writes();
     test_contact_limit_rejects_new_but_allows_update();

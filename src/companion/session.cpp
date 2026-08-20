@@ -403,6 +403,12 @@ Bytes Session::cmd_sync_next_message(ByteView args) {
     auto msg = node_.pop_message();
     if (!msg) return Bytes {kRespNoMoreMessages};
 
+    // The queue is persisted, so a collected message has to stop being queued
+    // on disk too. Coalesced like any other mutation rather than written here:
+    // an app draining forty messages would otherwise cost forty rewrites, and
+    // a crash in that window re-delivers rather than loses.
+    state_.request_save();
+
     if (msg->is_channel) {
         Bytes out {kRespChannelMsgRecvV3};
         out.push_back(static_cast<uint8_t>(msg->snr_q4));

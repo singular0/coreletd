@@ -19,7 +19,7 @@ Node::Node(EventLoop& loop, Dispatcher& dispatcher, const crypto::LocalIdentity&
       channels_(channels),
       cfg_(std::move(cfg)),
       sender_(loop, dispatcher, self, contacts, cfg_.pending_send_limit),
-      inbox_(cfg_.message_queue_limit) {}
+      inbox_(cfg_.message_queue_limit, cfg_.messages_path) {}
 
 void Node::start() {
     dispatcher_.set_rx_handler([this](proto::Packet&& p) { on_packet(std::move(p)); });
@@ -337,7 +337,10 @@ void Node::maybe_repeat(const proto::Packet& p) {
 }
 
 void Node::store_message(StoredMessage msg) {
-    inbox_.store(std::move(msg));
+    // A failed commit is reported but the message is still queued and still
+    // acked: it is in memory either way, and refusing the ack would make the
+    // sender retry into a daemon whose disk is the actual problem.
+    if (!inbox_.store(std::move(msg))) LOG_ERROR("msg: queued but not persisted");
     if (delegate_) delegate_->on_message_stored();
 }
 

@@ -6,6 +6,9 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+
+#include "util/log.h"
 
 namespace clt {
 
@@ -84,6 +87,24 @@ bool durable_replace(const std::string& tmp_path, const std::string& path,
         return false;
     }
     return sync_and_close(parent_fd, "directory " + parent, error);
+}
+
+std::string quarantine(const std::string& path) {
+    // Second-resolution suffix: two corrupt files in the same second would be
+    // the same file rewritten, and keeping the first is the useful choice.
+    char suffix[32];
+    std::time_t now = std::time(nullptr);
+    std::tm tm {};
+    ::gmtime_r(&now, &tm);
+    std::strftime(suffix, sizeof suffix, ".corrupt-%Y%m%d-%H%M%S", &tm);
+
+    std::string dest = path + suffix;
+    if (::rename(path.c_str(), dest.c_str()) != 0) {
+        LOG_ERROR("cannot move %s aside: %s", path.c_str(), std::strerror(errno));
+        return {};
+    }
+    LOG_WARN("%s could not be read; kept as %s", path.c_str(), dest.c_str());
+    return dest;
 }
 
 }  // namespace clt

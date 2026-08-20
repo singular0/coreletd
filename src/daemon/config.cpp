@@ -197,6 +197,7 @@ std::vector<Setting> settings(Config& cfg, Raw& raw) {
         Str("storage.identity_path", cfg.identity_path),
         Str("storage.contacts_path", cfg.contacts_path),
         Str("storage.channels_path", cfg.channels_path),
+        Str("storage.messages_path", cfg.messages_path),
 
         // --- logging ---
         Str("logging.log_level", raw.log_level),
@@ -309,6 +310,10 @@ void Config::finalise() {
     if (identity_path.empty()) identity_path = state_dir + "/identity";
     if (contacts_path.empty()) contacts_path = state_dir + "/contacts";
     if (channels_path.empty()) channels_path = state_dir + "/channels";
+    if (messages_path.empty()) messages_path = state_dir + "/messages";
+    // The queue lives inside Node, so it is the node config that carries the
+    // path; storage.messages_path stays where an operator expects to find it.
+    node.messages_path = messages_path;
 }
 
 }  // namespace clt

@@ -6,6 +6,7 @@
 #include "util/clock.h"
 #include "util/hex.h"
 #include "util/log.h"
+#include "util/persist.h"
 #include "version.h"  // generated: CORELETD_VERSION, resolved from git
 
 #if CORELETD_HAVE_SX1262
@@ -103,7 +104,22 @@ bool App::start() {
                                          cfg_.node);
     node_->start();
 
-    state_ = std::make_unique<mesh::StateWriter>(loop_, *contacts_, *channels_);
+    switch (node_->inbox().load()) {
+        case mesh::MessageInbox::Load::Loaded:
+            LOG_INFO("messages: recovered %zu waiting for an app", node_->inbox().size());
+            break;
+        case mesh::MessageInbox::Load::Corrupt:
+            // Keep going with an empty queue rather than refusing to start —
+            // the radio is the point of the daemon — but move the unreadable
+            // file aside so the next save does not erase the evidence.
+            quarantine(cfg_.messages_path);
+            break;
+        case mesh::MessageInbox::Load::Missing:
+            break;
+    }
+
+    state_ = std::make_unique<mesh::StateWriter>(loop_, *contacts_, *channels_,
+                                                 node_->inbox());
     state_->start();
 
     server_ = std::make_unique<companion::Server>(loop_, cfg_.companion);

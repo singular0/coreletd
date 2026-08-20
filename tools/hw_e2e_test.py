@@ -760,6 +760,20 @@ class Harness:
               f"from {got.get('pubkey_prefix')} SNR {got.get('SNR')} dB "
               f"path_len {got.get('path_len')}")
 
+            # The field is MeshCore's way round: 255 means the message came
+            # direct, anything else is the path_length byte a flood-routed one
+            # arrived with. Which of the two the peer sent is not ours to
+            # choose, so ask the peer: it routes direct exactly when it holds an
+            # out_path for us, and floods otherwise.
+            route = self.peer.find_contact(self.uconsole_key[:12]) or {}
+            direct = route.get("out_path_len", -1) >= 0
+            plen = got.get("path_len")
+            c("message_rx", "path_len says how the message was routed",
+              plen == 255 if direct else isinstance(plen, int) and 0 <= plen <= 63,
+              f"path_len {plen}, and the peer holds "
+              f"{'a route' if direct else 'no route'} to us "
+              f"(out_path_len={route.get('out_path_len')})")
+
     def phase_message_tx(self) -> None:
         self.banner("message_tx", "coreletd → peer, retried until acknowledged")
         c = self.report.check

@@ -20,6 +20,7 @@
 #include "crypto/crypto.h"
 #include "crypto/identity.h"
 #include "daemon/app.h"
+#include "mesh/channels.h"
 #include "mesh/contacts.h"
 #include "proto/packet.h"
 #include "proto/payloads.h"
@@ -271,6 +272,101 @@ static void test_message_received_offline_survives_a_restart() {
     app.request_stop();
 }
 
+// MeshCore reports a received message's path the opposite way round from the
+// intuitive reading: 0xFF says it came direct, and anything else is the flood
+// path_length byte the packet arrived with. Clients depend on exactly that — the
+// Python client tests `plen == 255` for direct and meshcore-cli renders it as
+// "D" — so getting it backwards mislabels every message in the app.
+static void test_message_path_len_is_meshcores_way_round() {
+    const std::string dir = fresh_state_dir("pathlen");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string socket_path = cfg.companion.socket_path;
+
+    ManualClock clock;
+    auto radio = std::make_unique<GatedRadio>();
+    GatedRadio* air = radio.get();
+    App app(std::move(cfg), std::move(radio), clock);
+    CHECK(app.start());
+    air->set_ready(true);
+
+    // A's advert first: without the contact there is no shared secret and the
+    // text below is undecryptable.
+    air->inject(from_hex(pv::kAdvertPacket));
+
+    Client client(app, socket_path);
+    CHECK(client.connected());
+    if (!client.connected()) return;
+    client.send(Bytes {kCmdAppStart, 1, 0, 0, 0, 0, 0, 't', 'e', 's', 't'});
+    CHECK(!client.await(kRespSelfInfo).empty());
+
+    auto peer = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivB));
+    CHECK(peer.has_value());
+    CHECK(self.has_value());
+    if (!peer || !self) return;
+    auto shared = peer->shared_secret(self->pub());
+    CHECK(shared.has_value());
+    if (!shared) return;
+
+    // Each message needs its own timestamp: the node delivers a repeat of one
+    // it has already handed over exactly once, however it was routed.
+    uint32_t stamp = 1700000000;
+    auto text_payload = [&](ByteView key, bool group) {
+        proto::TextMessage msg;
+        msg.timestamp = ++stamp;
+        msg.txt_type = proto::kTxtPlain;
+        msg.text = from_str(group ? "uConsole: hello" : "hello");
+        return group ? proto::GroupEnvelope::seal(mesh::Channel::public_channel().hash(), key,
+                                                  msg.encode())
+                           .encode()
+                     : proto::DirectEnvelope::seal(self->pub()[0], peer->pub()[0], key,
+                                                   msg.encode())
+                           .encode();
+    };
+
+    // Injects one message and returns the path_len byte the companion frame
+    // reports for it, or -1 if no frame arrived.
+    auto reported_path_len = [&](proto::PayloadType type, proto::RouteType route, size_t hops,
+                                 bool group) -> int {
+        proto::Packet p;
+        p.type = type;
+        p.route = route;
+        p.path_hash_size = 1;
+        p.path.assign(hops, 0xa1);
+        p.payload = group ? text_payload(mesh::Channel::public_channel().secret, true)
+                          : text_payload(*shared, false);
+        air->inject(p.encode());
+
+        client.send(Bytes {kCmdSyncNextMessage});
+        const uint8_t code = group ? kRespChannelMsgRecvV3 : kRespContactMsgRecvV3;
+        Bytes frame = client.await(code);
+        CHECK(!frame.empty());
+        // code(1) snr(1) reserved(2), then either a 6-byte sender prefix or a
+        // one-byte channel index, and the path_len byte after it.
+        const size_t at = group ? 5 : 10;
+        if (frame.size() <= at) return -1;
+        return frame[at];
+    };
+
+    // Direct: 0xFF, and never the hop count. A direct packet reaches its
+    // destination with an empty path — every hop pops itself off on the way —
+    // so reporting hops here would say "zero hops, flooded" for all of them.
+    CHECK_EQ(reported_path_len(proto::PayloadType::TxtMsg, proto::RouteType::Direct, 0, false),
+             0xFF);
+    CHECK_EQ(reported_path_len(proto::PayloadType::GrpTxt, proto::RouteType::Direct, 0, true),
+             0xFF);
+
+    // Flood: the packed path_length byte, so the hop count and the hash-size
+    // bits both survive to the app.
+    CHECK_EQ(reported_path_len(proto::PayloadType::TxtMsg, proto::RouteType::Flood, 0, false), 0);
+    CHECK_EQ(reported_path_len(proto::PayloadType::TxtMsg, proto::RouteType::Flood, 3, false), 3);
+    CHECK_EQ(reported_path_len(proto::PayloadType::GrpTxt, proto::RouteType::Flood, 0, true), 0);
+    CHECK_EQ(reported_path_len(proto::PayloadType::GrpTxt, proto::RouteType::Flood, 2, true), 2);
+
+    app.request_stop();
+}
+
 // Counts the files a quarantine left behind, which is how the daemon says it
 // found a state file it could not read.
 static int quarantined(const std::string& dir, const std::string& stem) {
@@ -514,6 +610,7 @@ int main() {
 
     test_received_text_is_acked_on_air();
     test_message_received_offline_survives_a_restart();
+    test_message_path_len_is_meshcores_way_round();
     test_corrupt_contacts_are_kept_not_overwritten();
     test_corrupt_contacts_recover_from_the_backup();
     test_companion_app_round_trip();

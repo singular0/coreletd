@@ -20,7 +20,9 @@ struct StoredMessage {
     uint8_t txt_type = proto::kTxtPlain;
     std::string text;
     int8_t snr_q4 = 0;  // SNR * 4, as the companion protocol carries it
-    uint8_t path_len = 0xFF;  // 0xFF == arrived by flood
+    // The packed path_length byte when the message arrived flood-routed, 0xFF
+    // when it arrived direct — MeshCore's convention, not the intuitive one.
+    uint8_t path_len = 0xFF;
 };
 
 // Store-and-forward queue for received messages. The radio keeps running with

@@ -17,6 +17,21 @@ constexpr uint32_t kDeliveredTtlMs = 300000;
 // still cannot grow the table without limit.
 constexpr size_t kMaxDelivered = 512;
 
+namespace {
+
+// What the companion protocol calls a message's path_len, MeshCore's way round
+// (MyMesh::queueMessage): the packed path_length byte for a flood-routed
+// packet, and 0xFF for a direct-routed one. Clients read it that way — the
+// Python client tests `plen == 255` for direct and splits the rest into hash
+// mode and hop count — so the flood branch has to carry the whole byte, and the
+// hop count is useless here anyway: a direct packet arrives with an empty path,
+// because every hop pops itself off on the way.
+uint8_t companion_path_len(const proto::Packet& p) {
+    return p.is_flood() ? p.packed_path_len() : 0xFF;
+}
+
+}  // namespace
+
 Node::Node(EventLoop& loop, Dispatcher& dispatcher, const crypto::LocalIdentity& self,
            ContactStore& contacts, ChannelStore& channels, Config cfg)
     : loop_(loop),
@@ -235,7 +250,7 @@ void Node::handle_text(const proto::Packet& p) {
         stored.txt_type = msg->txt_type;
         stored.text = body;
         stored.snr_q4 = static_cast<int8_t>(std::clamp(p.snr * 4.0f, -128.0f, 127.0f));
-        stored.path_len = p.is_flood() ? 0xFF : static_cast<uint8_t>(p.hop_count());
+        stored.path_len = companion_path_len(p);
         store_message(std::move(stored));
     } else {
         LOG_DEBUG("msg: attempt %u repeats one already delivered, acking again", msg->attempt);
@@ -330,7 +345,7 @@ void Node::handle_group_text(const proto::Packet& p) {
         stored.txt_type = msg->txt_type;
         stored.text = body;
         stored.snr_q4 = static_cast<int8_t>(std::clamp(p.snr * 4.0f, -128.0f, 127.0f));
-        stored.path_len = p.is_flood() ? 0xFF : static_cast<uint8_t>(p.hop_count());
+        stored.path_len = companion_path_len(p);
         store_message(std::move(stored));
         return;
     }

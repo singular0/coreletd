@@ -923,9 +923,14 @@ void Sx1262::shutdown() {
 }
 
 std::string Sx1262::describe() const {
-    std::string s = vformat("SX1262 on %s (%.3f MHz, SF%u, BW %.1f kHz, CR 4/%u, %d dBm)",
-                            pins_.spidev.c_str(), params_.freq_mhz, params_.sf, params_.bw_khz,
-                            params_.cr, params_.tx_power_dbm);
+    // The preamble is in here because it is the one air setting with no line in
+    // the config file to read it off: unset means derived from the spreading
+    // factor, so the log is the only place it is visible to compare against a
+    // neighbour's.
+    std::string s =
+        vformat("SX1262 on %s (%.3f MHz, SF%u, BW %.1f kHz, CR 4/%u, %d dBm, %u-symbol preamble)",
+                pins_.spidev.c_str(), params_.freq_mhz, params_.sf, params_.bw_khz, params_.cr,
+                params_.tx_power_dbm, params_.preamble_symbols());
     if (!healthy_) s += " — not responding";
     return s;
 }

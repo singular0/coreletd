@@ -422,6 +422,34 @@ static void test_failed_receptions_are_counted_separately() {
     CHECK_EQ(s.rx_bad, uint32_t {0});
 }
 
+// The counts alone cannot say which kind of failure a run of them was: traffic
+// arriving too weak to decode and a demodulator chasing noise produce the same
+// tally and want opposite answers. The signal the modem measured is the only
+// thing that separates them, and nothing else reports it — the packet never
+// reached the stack.
+static void test_failed_receptions_carry_the_signal_they_failed_at() {
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    radio.inject_error(radio::RxError::CrcError, -106, -14.2f);
+    const auto& s = dispatcher.stats();
+    CHECK_EQ(s.last_failed_rssi, -106);
+    CHECK(s.last_failed_snr < -14.0f && s.last_failed_snr > -14.5f);
+
+    // A header error carries it too: the modem measured what it gave up on.
+    radio.inject_error(radio::RxError::HeaderError, -92, -9.0f);
+    CHECK_EQ(s.last_failed_rssi, -92);
+
+    // A timeout means nothing arrived at all, so there is nothing to measure
+    // and the last real measurement must not be overwritten with a stale one.
+    radio.inject_error(radio::RxError::Timeout);
+    CHECK_EQ(s.last_failed_rssi, -92);
+    CHECK_EQ(s.rx_timeout, uint32_t {1});
+}
+
 // Sx1262::send() begins with SetStandby, which tears down a reception already
 // in progress — so transmitting over one loses the packet we were half way
 // through receiving, on top of corrupting it for whoever sent it.
@@ -1424,6 +1452,7 @@ int main() {
     test_duty_cycle_budget_returns_with_the_window();
     test_dispatch_result_waits_for_actual_transmission();
     test_failed_receptions_are_counted_separately();
+    test_failed_receptions_carry_the_signal_they_failed_at();
     test_transmission_waits_for_a_clear_channel();
     test_a_channel_that_never_clears_does_not_stall_the_queue();
     test_identical_pending_messages_are_coalesced();

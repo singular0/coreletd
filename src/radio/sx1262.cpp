@@ -813,9 +813,25 @@ void Sx1262::on_irq() {
         // demodulator locked onto a preamble and gave up before the packet was
         // complete. Report it either way, because the rate of these is the only
         // thing that separates a deaf receiver from a quiet band.
-        deliver_rx_error(irq & kIrqCrcErr      ? RxError::CrcError
-                         : irq & kIrqHeaderErr ? RxError::HeaderError
-                                               : RxError::Timeout);
+        RxFailure f;
+        f.error = irq & kIrqCrcErr      ? RxError::CrcError
+                  : irq & kIrqHeaderErr ? RxError::HeaderError
+                                        : RxError::Timeout;
+
+        // The chip still holds the packet status for whatever it gave up on,
+        // and that is what says which kind of failure this was. Not after a
+        // timeout: nothing arrived, so the registers still describe the last
+        // packet that did, and reporting those would be an invention.
+        if (f.error != RxError::Timeout) {
+            uint8_t pkt_status[3] = {0, 0, 0};
+            if (cmd_read(kCmdGetPacketStatus, pkt_status)) {
+                f.has_signal = true;
+                f.rssi = -static_cast<int>(pkt_status[0]) / 2;
+                f.snr = static_cast<int8_t>(pkt_status[1]) / 4.0f;
+            }
+        }
+
+        deliver_rx_error(f);
         if (!set_rx_mode()) fail("returning to RX after a failed reception");
         return;
     }

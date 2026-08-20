@@ -59,7 +59,7 @@ Dispatcher::Dispatcher(EventLoop& loop, radio::Radio& radio, size_t queue_limit)
 
 bool Dispatcher::start(std::string& error) {
     radio_.set_rx_handler([this](radio::RxPacket&& rx) { on_radio_rx(std::move(rx)); });
-    radio_.set_rx_error_handler([this](radio::RxError e) { on_radio_rx_error(e); });
+    radio_.set_rx_error_handler([this](const radio::RxFailure& f) { on_radio_rx_error(f); });
     radio_.set_tx_done_handler([this](uint32_t airtime) { on_radio_tx_done(airtime); });
 
     if (!radio_.begin(loop_, error)) return false;
@@ -70,9 +70,9 @@ bool Dispatcher::start(std::string& error) {
     return true;
 }
 
-void Dispatcher::on_radio_rx_error(radio::RxError e) {
+void Dispatcher::on_radio_rx_error(const radio::RxFailure& f) {
     const char* what = "timed out";
-    switch (e) {
+    switch (f.error) {
         case radio::RxError::HeaderError:
             stats_.rx_header_err++;
             what = "failed the header";
@@ -85,6 +85,20 @@ void Dispatcher::on_radio_rx_error(radio::RxError e) {
             stats_.rx_timeout++;
             break;
     }
+
+    // With the signal, because a count on its own says nothing: traffic too far
+    // away to decode and a demodulator chasing noise produce the same tally and
+    // want opposite answers. Kept from the diagnosis of a mesh we could hear
+    // but not read, where these numbers were the whole story.
+    if (f.has_signal) {
+        stats_.last_failed_rssi = f.rssi;
+        stats_.last_failed_snr = f.snr;
+        LOG_DEBUG("rx: reception %s at rssi %d snr %.1f, nothing decoded "
+                  "(%u decoded, %u failed so far)",
+                  what, f.rssi, static_cast<double>(f.snr), stats_.rx_total,
+                  stats_.rx_header_err + stats_.rx_crc_err + stats_.rx_timeout);
+        return;
+    }
     LOG_DEBUG("rx: reception %s, nothing decoded (%u decoded, %u failed so far)", what,
               stats_.rx_total, stats_.rx_header_err + stats_.rx_crc_err + stats_.rx_timeout);
 }
@@ -92,9 +106,11 @@ void Dispatcher::on_radio_rx_error(radio::RxError e) {
 void Dispatcher::log_rf_summary() const {
     const uint32_t failed = stats_.rx_header_err + stats_.rx_crc_err + stats_.rx_timeout;
     LOG_INFO("radio: heard %u packets (%u duplicate), %u failed to decode "
-             "(%u header, %u CRC, %u timeout); last rssi %d snr %.1f",
+             "(%u header, %u CRC, %u timeout); last rssi %d snr %.1f, "
+             "last failure rssi %d snr %.1f",
              stats_.rx_total, stats_.rx_dup, failed, stats_.rx_header_err, stats_.rx_crc_err,
-             stats_.rx_timeout, stats_.last_rssi, static_cast<double>(stats_.last_snr));
+             stats_.rx_timeout, stats_.last_rssi, static_cast<double>(stats_.last_snr),
+             stats_.last_failed_rssi, static_cast<double>(stats_.last_failed_snr));
     LOG_INFO("radio: sent %u packets, %u dropped, %u held for a busy channel "
              "(%u sent over one anyway)",
              stats_.tx_total, stats_.tx_dropped, stats_.tx_deferred, stats_.tx_forced);

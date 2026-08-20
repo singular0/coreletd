@@ -44,6 +44,11 @@ struct DispatcherStats {
     uint64_t airtime_ms = 0;
     int last_rssi = 0;
     float last_snr = 0.0f;
+    // The same, for the last reception that failed. A link at the edge and a
+    // receiver chasing noise both raise the counters above; only the signal
+    // they came in at tells them apart.
+    int last_failed_rssi = 0;
+    float last_failed_snr = 0.0f;
 };
 
 // Owns the radio: everything that receives or transmits goes through here.
@@ -94,7 +99,7 @@ private:
     };
 
     void on_radio_rx(radio::RxPacket&& rx);
-    void on_radio_rx_error(radio::RxError e);
+    void on_radio_rx_error(const radio::RxFailure& f);
     void on_radio_tx_done(uint32_t airtime_ms);
     void log_rf_summary() const;
     void pump();

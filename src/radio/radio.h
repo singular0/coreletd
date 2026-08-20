@@ -21,6 +21,22 @@ struct RxPacket {
 // exactly like an idle band unless somebody counts these.
 enum class RxError { HeaderError, CrcError, Timeout };
 
+// A reception that failed, with whatever the modem can still say about it.
+// The rate alone cannot tell the two causes apart: real traffic arriving too
+// weak to decode comes in above the noise with a plausible SNR, while a
+// demodulator that locked onto noise reports a signal at the noise floor. The
+// numbers are what a link at the edge looks like from the inside, and there is
+// no other way to see it — nothing is decoded, so nothing else reports.
+struct RxFailure {
+    RxError error = RxError::Timeout;
+    // Of the reception that failed, when the modem has an estimate. A timeout
+    // means nothing arrived at all, so `has_signal` is false and the two
+    // numbers are meaningless.
+    bool has_signal = false;
+    int rssi = 0;
+    float snr = 0.0f;
+};
+
 // Defaults are MeshCore's on-air settings. Frequency deliberately has no
 // default: the region is a legal question, so the config file must state it.
 struct RadioParams {
@@ -73,7 +89,7 @@ struct RadioParams {
 class Radio {
 public:
     using RxHandler = std::function<void(RxPacket&&)>;
-    using RxErrorHandler = std::function<void(RxError)>;
+    using RxErrorHandler = std::function<void(const RxFailure&)>;
     using TxDoneHandler = std::function<void(uint32_t airtime_ms)>;
 
     virtual ~Radio() = default;
@@ -114,8 +130,8 @@ protected:
     void deliver_rx(RxPacket&& p) {
         if (on_rx_) on_rx_(std::move(p));
     }
-    void deliver_rx_error(RxError e) {
-        if (on_rx_error_) on_rx_error_(e);
+    void deliver_rx_error(const RxFailure& f) {
+        if (on_rx_error_) on_rx_error_(f);
     }
     void deliver_tx_done(uint32_t airtime) {
         if (on_tx_done_) on_tx_done_(airtime);

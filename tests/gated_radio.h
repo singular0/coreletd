@@ -46,7 +46,12 @@ public:
 
     // A reception the modem started and abandoned: no payload, just the fact
     // that something was on the air and could not be read.
-    void inject_error(radio::RxError e) { deliver_rx_error(e); }
+    void inject_error(radio::RxError e) { deliver_rx_error(radio::RxFailure {e}); }
+    // A failed reception the modem could still measure, as the SX1262 reports
+    // one for everything except a timeout.
+    void inject_error(radio::RxError e, int rssi, float snr) {
+        deliver_rx_error(radio::RxFailure {e, true, rssi, snr});
+    }
 
     // Lets a test hold the channel busy, as a reception in progress does.
     void set_channel_busy(bool busy) { channel_busy_ = busy; }

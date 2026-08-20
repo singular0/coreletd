@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 #include "mesh/channels.h"
 #include "mesh/contacts.h"
@@ -102,6 +103,13 @@ private:
     // Tries every contact whose id matches the source hash until one decrypts.
     Contact* decrypt_from(uint8_t src_hash, ByteView mac, ByteView ciphertext, Bytes& plaintext);
 
+    // True the first time this message is seen, false for a retry of one
+    // already delivered. Retries are distinct packets — the attempt number
+    // occupies two bits of the flags byte — so packet-level dedup cannot tell
+    // that they are the same message.
+    bool first_delivery(const Contact& from, const proto::TextMessage& msg);
+    void expire_delivered();
+
     void store_message(StoredMessage msg);
     void send_ack(const Contact& to, ByteView ack_hash, uint8_t extended_attempt);
     void record_return_path(Contact& c, const proto::Packet& p);
@@ -117,8 +125,13 @@ private:
     Delegate* delegate_ = nullptr;
 
     EventLoop::Timer advert_timer_;
+    EventLoop::Timer delivered_sweep_;
     ReliableSender sender_;
     MessageInbox inbox_;
+
+    // Logical message identity -> expiry in millis. Bounded by the sweep and by
+    // a hard cap, so a busy mesh cannot grow it without limit.
+    std::unordered_map<uint64_t, uint32_t> delivered_;
 };
 
 }  // namespace clt::mesh

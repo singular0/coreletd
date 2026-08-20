@@ -10,6 +10,13 @@
 
 namespace clt::mesh {
 
+// Long enough to outlast any sender's retry ladder: ours runs 8/16/32 seconds
+// and escalates to flood on the last, and MeshCore's is in the same range.
+constexpr uint32_t kDeliveredTtlMs = 300000;
+// A hard ceiling as well as the sweep, so a mesh busier than the sweep interval
+// still cannot grow the table without limit.
+constexpr size_t kMaxDelivered = 512;
+
 Node::Node(EventLoop& loop, Dispatcher& dispatcher, const crypto::LocalIdentity& self,
            ContactStore& contacts, ChannelStore& channels, Config cfg)
     : loop_(loop),
@@ -31,6 +38,8 @@ void Node::start() {
         advert_timer_ =
             loop_.add_repeating(cfg_.advert_interval_s * 1000, [this] { send_advert(true); });
     }
+    // Bounds the table of messages already handed to the app.
+    delivered_sweep_ = loop_.add_repeating(kDeliveredTtlMs, [this] { expire_delivered(); });
 }
 
 proto::AdvertAppData Node::build_appdata() const {
@@ -216,15 +225,21 @@ void Node::handle_text(const proto::Packet& p) {
     LOG_INFO("msg from %s (%zu bytes)", sender.c_str(), body.size());
     LOG_TRACE("msg from %s: %s", sender.c_str(), body.c_str());
 
-    StoredMessage stored;
-    stored.is_channel = false;
-    stored.sender_pubkey = from->pubkey;
-    stored.timestamp = msg->timestamp;
-    stored.txt_type = msg->txt_type;
-    stored.text = body;
-    stored.snr_q4 = static_cast<int8_t>(std::clamp(p.snr * 4.0f, -128.0f, 127.0f));
-    stored.path_len = p.is_flood() ? 0xFF : static_cast<uint8_t>(p.hop_count());
-    store_message(std::move(stored));
+    // A retry is acked like any other copy — the sender is retrying precisely
+    // because it did not hear the first ack — but it is only delivered once.
+    if (first_delivery(*from, *msg)) {
+        StoredMessage stored;
+        stored.is_channel = false;
+        stored.sender_pubkey = from->pubkey;
+        stored.timestamp = msg->timestamp;
+        stored.txt_type = msg->txt_type;
+        stored.text = body;
+        stored.snr_q4 = static_cast<int8_t>(std::clamp(p.snr * 4.0f, -128.0f, 127.0f));
+        stored.path_len = p.is_flood() ? 0xFF : static_cast<uint8_t>(p.hop_count());
+        store_message(std::move(stored));
+    } else {
+        LOG_DEBUG("msg: attempt %u repeats one already delivered, acking again", msg->attempt);
+    }
 
     // CLI responses are never acked.
     if (msg->txt_type != proto::kTxtCliData) {
@@ -335,6 +350,46 @@ void Node::maybe_repeat(const proto::Packet& p) {
     uint8_t r = 0;
     crypto::random_bytes(ByteSpan(&r, 1));
     dispatcher_.send(std::move(out), kPriorityRepeat, 100 + (r * 4));
+}
+
+bool Node::first_delivery(const Contact& from, const proto::TextMessage& msg) {
+    // Identity is everything the sender would have to change to make this a
+    // different message. The attempt number is deliberately not part of it —
+    // that is exactly what differs between a retry and the original.
+    Bytes id;
+    id.reserve(from.pubkey.size() + 5 + msg.text.size());
+    put_bytes(id, from.pubkey);
+    put_u32(id, msg.timestamp);
+    id.push_back(msg.txt_type);
+    put_bytes(id, msg.text);
+
+    const Bytes digest = crypto::sha256(id);
+    uint64_t key = 0;
+    for (size_t i = 0; i < 8 && i < digest.size(); i++)
+        key = (key << 8) | digest[i];
+
+    const uint32_t now = loop_.now_ms();
+    auto it = delivered_.find(key);
+    if (it != delivered_.end() && static_cast<int32_t>(it->second - now) > 0) {
+        // Refresh, so a sender still retrying keeps it suppressed.
+        it->second = now + kDeliveredTtlMs;
+        return false;
+    }
+
+    if (delivered_.size() >= kMaxDelivered) {
+        expire_delivered();
+        // Still full means everything in it is live; drop one rather than grow.
+        if (delivered_.size() >= kMaxDelivered) delivered_.erase(delivered_.begin());
+    }
+    delivered_[key] = now + kDeliveredTtlMs;
+    return true;
+}
+
+void Node::expire_delivered() {
+    const uint32_t now = loop_.now_ms();
+    std::erase_if(delivered_, [now](const auto& kv) {
+        return static_cast<int32_t>(kv.second - now) <= 0;
+    });
 }
 
 void Node::store_message(StoredMessage msg) {

@@ -826,6 +826,78 @@ static void test_received_message_marks_store_dirty() {
     CHECK(contacts.dirty());
 }
 
+// The attempt number is two bits of the flags byte, so every retry is a
+// different packet and packet-level dedup cannot see that they are the same
+// message. A sender that never hears our ack works through its whole ladder,
+// and the app used to be shown the same text once per attempt.
+static void test_retries_are_acked_every_time_but_delivered_once() {
+    auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivB));
+    auto peer_id = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
+    if (!self || !peer_id) return;
+
+    ContactStore contacts(*self);
+    Contact& peer = *contacts.upsert(from_hex(pv::kPubA));
+    contacts.set_path(peer, {});
+    ChannelStore channels;
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+    radio.set_ready(true);
+
+    Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
+    node.start();
+
+    const Bytes shared = peer.shared_secret(*peer_id);
+    CHECK(!shared.empty());
+
+    // The same message, sent four times, as a sender that hears no ack does.
+    for (uint8_t attempt = 0; attempt < 4; attempt++) {
+        proto::TextMessage msg;
+        msg.timestamp = 1700000000;
+        msg.txt_type = proto::kTxtPlain;
+        msg.attempt = attempt;
+        msg.text = from_str("are you there");
+
+        auto env = proto::DirectEnvelope::seal(self->pub()[0], peer_id->pub()[0], shared,
+                                               msg.encode());
+        proto::Packet p;
+        p.type = proto::PayloadType::TxtMsg;
+        p.route = proto::RouteType::Flood;
+        p.payload = env.encode();
+        radio.inject(p.encode());
+        // The test radio holds a transmission in flight until it is completed,
+        // so let each ack finish before the next attempt arrives.
+        radio.complete_tx();
+    }
+
+    // Every attempt is acked: the sender is retrying precisely because it did
+    // not hear the last one, so staying silent would guarantee another retry.
+    CHECK_EQ(radio.send_count(), size_t {4});
+
+    // But the app is shown it once.
+    CHECK(node.has_messages());
+    auto first = node.pop_message();
+    CHECK(first.has_value());
+    if (first) CHECK(first->text == "are you there");
+    CHECK(!node.has_messages());
+
+    // A genuinely different message from the same peer still gets through.
+    proto::TextMessage other;
+    other.timestamp = 1700000001;
+    other.txt_type = proto::kTxtPlain;
+    other.text = from_str("are you there");
+    auto env = proto::DirectEnvelope::seal(self->pub()[0], peer_id->pub()[0], shared,
+                                           other.encode());
+    proto::Packet p;
+    p.type = proto::PayloadType::TxtMsg;
+    p.route = proto::RouteType::Flood;
+    p.payload = env.encode();
+    radio.inject(p.encode());
+    CHECK(node.has_messages());
+}
+
 static void test_direct_ack_marks_store_dirty() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
@@ -1200,6 +1272,7 @@ int main() {
     test_queued_packet_expiry_reports_failure();
     test_contact_references_survive_insertion();
     test_received_message_marks_store_dirty();
+    test_retries_are_acked_every_time_but_delivered_once();
     test_direct_ack_marks_store_dirty();
     test_inbox_drops_oldest_when_full();
     test_inbox_eviction_is_counted();

@@ -422,6 +422,66 @@ static void test_failed_receptions_are_counted_separately() {
     CHECK_EQ(s.rx_bad, uint32_t {0});
 }
 
+// Sx1262::send() begins with SetStandby, which tears down a reception already
+// in progress — so transmitting over one loses the packet we were half way
+// through receiving, on top of corrupting it for whoever sent it.
+static void test_transmission_waits_for_a_clear_channel() {
+    ManualClock clock;
+    EventLoop loop(clock);
+    GatedRadio radio;
+    radio.set_ready(true);
+    radio.set_channel_busy(true);
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    proto::Packet packet;
+    packet.type = proto::PayloadType::Ack;
+    packet.payload = {1, 2, 3, 4};
+    CHECK(dispatcher.send(std::move(packet), kPriorityDirect));
+
+    // Nothing goes out over the top of a reception, however long we wait.
+    loop.advance(1000);
+    CHECK_EQ(radio.send_count(), size_t {0});
+    CHECK_EQ(dispatcher.queue_depth(), size_t {1});
+    CHECK(dispatcher.stats().tx_deferred > 0);
+
+    // And it leaves as soon as the air is clear again.
+    radio.set_channel_busy(false);
+    loop.advance(200);
+    CHECK_EQ(radio.send_count(), size_t {1});
+    CHECK_EQ(dispatcher.queue_depth(), size_t {0});
+    CHECK_EQ(dispatcher.stats().tx_forced, uint32_t {0});
+}
+
+// Politeness cannot be unbounded: a band that never goes quiet, or a receiver
+// stuck believing it hears a preamble, would otherwise stall every queue on the
+// node for good.
+static void test_a_channel_that_never_clears_does_not_stall_the_queue() {
+    ManualClock clock;
+    EventLoop loop(clock);
+    GatedRadio radio;
+    radio.set_ready(true);
+    radio.set_channel_busy(true);
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    proto::Packet packet;
+    packet.type = proto::PayloadType::Ack;
+    // Long enough not to expire while the dispatcher is being polite.
+    packet.payload = {1, 2, 3, 4};
+    CHECK(dispatcher.send(std::move(packet), kPriorityFlood));
+
+    loop.advance(3000);
+    CHECK_EQ(radio.send_count(), size_t {0});
+
+    // Past the ceiling it goes out anyway, and says so.
+    loop.advance(2000);
+    CHECK_EQ(radio.send_count(), size_t {1});
+    CHECK_EQ(dispatcher.stats().tx_forced, uint32_t {1});
+}
+
 static void test_identical_pending_messages_are_coalesced() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
@@ -1128,6 +1188,8 @@ int main() {
     test_duty_cycle_budget_returns_with_the_window();
     test_dispatch_result_waits_for_actual_transmission();
     test_failed_receptions_are_counted_separately();
+    test_transmission_waits_for_a_clear_channel();
+    test_a_channel_that_never_clears_does_not_stall_the_queue();
     test_identical_pending_messages_are_coalesced();
     test_earlier_pump_replaces_later_timer();
     test_dispatch_queue_drops_lowest_priority();

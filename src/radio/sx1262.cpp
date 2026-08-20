@@ -55,9 +55,21 @@ constexpr uint16_t kRegTxClampConfig = 0x08D8;
 // IRQ bits
 constexpr uint16_t kIrqTxDone = 0x0001;
 constexpr uint16_t kIrqRxDone = 0x0002;
+constexpr uint16_t kIrqPreambleDetected = 0x0004;
+constexpr uint16_t kIrqHeaderValid = 0x0010;
 constexpr uint16_t kIrqHeaderErr = 0x0020;
 constexpr uint16_t kIrqCrcErr = 0x0040;
 constexpr uint16_t kIrqTimeout = 0x0200;
+
+// The largest LoRa payload the chip will carry, and so the longest any single
+// reception can take.
+constexpr size_t kMaxPayloadSize = 255;
+
+// The explicit header is 8 symbols, plus the 4.25-symbol sync that follows the
+// preamble. Rounded up, and it only sets how long an unconfirmed preamble is
+// believed, so erring high costs a little delay and erring low costs a
+// destroyed reception.
+constexpr uint16_t kHeaderSymbols = 16;
 
 constexpr uint8_t kPacketTypeLoRa = 0x01;
 constexpr uint8_t kStandbyRc = 0x00;
@@ -601,10 +613,15 @@ bool Sx1262::configure(std::string& error) {
     if (!cmd(kCmdSetRxTxFallbackMode, Bytes {0x20}))
         return fail_with("SetRxTxFallbackMode");
 
-    // Route everything we care about to DIO1.
-    const uint16_t mask = kIrqTxDone | kIrqRxDone | kIrqCrcErr | kIrqHeaderErr | kIrqTimeout;
-    Bytes irq_args {static_cast<uint8_t>(mask >> 8), static_cast<uint8_t>(mask),
-                    static_cast<uint8_t>(mask >> 8), static_cast<uint8_t>(mask),
+    // Two different masks. Everything we act on is routed to DIO1; preamble and
+    // header-valid are only latched, so channel_busy() can poll them before a
+    // transmission. Routing those to DIO1 as well would wake the event loop for
+    // every preamble on the band, which is a lot of wakeups to learn nothing.
+    const uint16_t latched = kIrqTxDone | kIrqRxDone | kIrqCrcErr | kIrqHeaderErr | kIrqTimeout |
+                             kIrqPreambleDetected | kIrqHeaderValid;
+    const uint16_t dio1 = kIrqTxDone | kIrqRxDone | kIrqCrcErr | kIrqHeaderErr | kIrqTimeout;
+    Bytes irq_args {static_cast<uint8_t>(latched >> 8), static_cast<uint8_t>(latched),
+                    static_cast<uint8_t>(dio1 >> 8),    static_cast<uint8_t>(dio1),
                     0x00, 0x00,   // DIO2 unused (it drives the RF switch)
                     0x00, 0x00};  // DIO3 unused (it powers the TCXO)
     if (!cmd(kCmdSetDioIrqParams, irq_args)) return fail_with("SetDioIrqParams");
@@ -656,6 +673,54 @@ bool Sx1262::set_rx_mode() {
 // ---------------------------------------------------------------------------
 // Transmit / receive
 // ---------------------------------------------------------------------------
+
+// Symbol time at the configured spreading factor and bandwidth: 2^sf / bw, in
+// milliseconds, since bandwidth is already in kHz.
+uint32_t Sx1262::symbols_ms(uint32_t symbols) const {
+    if (params_.sf < 5 || params_.bw_khz <= 0) return 0;
+    const double per_symbol = static_cast<double>(uint32_t {1} << params_.sf) / params_.bw_khz;
+    return static_cast<uint32_t>(per_symbol * symbols) + 1;
+}
+
+bool Sx1262::channel_busy() {
+    // Nothing to protect if the chip is down, and during our own transmission
+    // the flags describe the packet we are sending, not one arriving.
+    if (!healthy_ || tx_busy_) return false;
+
+    uint8_t status[2] = {0, 0};
+    // A chip that will not answer is a bigger problem than a busy channel, and
+    // the supervisor is the one that deals with it. Do not block the queue.
+    if (!cmd_read(kCmdGetIrqStatus, status)) return false;
+    const uint16_t irq = static_cast<uint16_t>(status[0] << 8 | status[1]);
+
+    if (!(irq & (kIrqPreambleDetected | kIrqHeaderValid))) {
+        rx_since_ms_ = 0;
+        return false;
+    }
+
+    const uint32_t now = millis();
+    if (rx_since_ms_ == 0) rx_since_ms_ = now;
+
+    // The two stages get very different deadlines, because a preamble detector
+    // fires on noise as readily as on a packet. Until a header validates, allow
+    // only the time it takes one to arrive; once one has, a real packet is on
+    // its way and it gets the longest the chip can carry. Giving an unconfirmed
+    // preamble the full packet time instead costs seconds of delay on every
+    // transmission that follows a burst of noise — which on a quiet bench is
+    // most of them.
+    const uint32_t deadline = (irq & kIrqHeaderValid)
+                                  ? airtime_ms(kMaxPayloadSize)
+                                  : symbols_ms(params_.preamble + kHeaderSymbols);
+    if (now - rx_since_ms_ > deadline) {
+        LOG_TRACE("sx1262: reception flag stale after %u ms, clearing", now - rx_since_ms_);
+        constexpr uint16_t stale = kIrqPreambleDetected | kIrqHeaderValid;
+        cmd(kCmdClearIrqStatus,
+            Bytes {static_cast<uint8_t>(stale >> 8), static_cast<uint8_t>(stale)});
+        rx_since_ms_ = 0;
+        return false;
+    }
+    return true;
+}
 
 bool Sx1262::send(ByteView data) {
     if (!healthy_ || tx_busy_) return false;

@@ -32,6 +32,11 @@ struct DispatcherStats {
     uint32_t rx_timeout = 0;
     uint32_t rx_flood = 0;
     uint32_t rx_direct = 0;
+    // Transmissions held back because something was already on the air. A
+    // steady stream of these is a busy band; a stream that never clears is what
+    // the forced-send ceiling exists for.
+    uint32_t tx_deferred = 0;
+    uint32_t tx_forced = 0;
     uint32_t tx_total = 0;
     uint32_t tx_flood = 0;
     uint32_t tx_direct = 0;
@@ -107,6 +112,9 @@ private:
     EventLoop::Timer rf_summary_;
     EventLoop::Timer pump_timer_;
     uint32_t pump_due_ms_ = 0;
+    // When the queue first found the channel busy, so a band that never goes
+    // quiet cannot hold traffic forever.
+    uint32_t busy_since_ms_ = 0;
 
     // dedup hash (4 bytes, packed into a u32) -> expiry in millis
     std::unordered_map<uint32_t, uint32_t> seen_;

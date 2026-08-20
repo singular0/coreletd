@@ -66,6 +66,14 @@ public:
     virtual bool send(ByteView data) = 0;
     virtual bool tx_busy() const = 0;
 
+    // True while a reception is in progress — a preamble or header has been
+    // seen and the packet has not finished arriving. Keying up now destroys it
+    // at both ends: Sx1262::send() begins with SetStandby, which tears down our
+    // own half-received packet, and 22 dBm on top of somebody else's
+    // transmission corrupts theirs. Default false, so a backend with no notion
+    // of a busy channel simply behaves as it always did.
+    virtual bool channel_busy() { return false; }
+
     // False while the hardware is unusable. begin() succeeding does not imply
     // this: a driver whose chip is unpowered comes up not-ready and goes ready
     // once the chip turns up. Nothing is transmitted while it is false.

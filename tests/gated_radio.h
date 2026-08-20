@@ -48,6 +48,10 @@ public:
     // that something was on the air and could not be read.
     void inject_error(radio::RxError e) { deliver_rx_error(e); }
 
+    // Lets a test hold the channel busy, as a reception in progress does.
+    void set_channel_busy(bool busy) { channel_busy_ = busy; }
+    bool channel_busy() override { return channel_busy_; }
+
     size_t send_count() const { return send_count_; }
     const Bytes& last_sent() const { return last_sent_; }
 
@@ -56,6 +60,7 @@ private:
     EventLoop* loop_ = nullptr;
     bool ready_ = false;
     bool busy_ = false;
+    bool channel_busy_ = false;
     size_t send_count_ = 0;
     Bytes last_sent_;
 };

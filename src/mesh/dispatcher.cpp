@@ -28,6 +28,18 @@ constexpr uint32_t kJitterMs = 400;
 // the two are indistinguishable without a running count of failed receptions.
 constexpr uint32_t kRfSummaryMs = 300000;
 
+// Listen-before-transmit. A packet at SF8 takes a few hundred milliseconds, so
+// looking again this often costs little and catches the channel clearing early.
+// The jitter matters as much as the delay: two nodes both waiting out the same
+// transmission would otherwise start theirs in the same instant.
+constexpr uint32_t kChannelBusyRetryMs = 60;
+constexpr uint32_t kChannelBusyJitterMs = 60;
+
+// How long to keep deferring before transmitting anyway. Somebody has to give
+// up on a channel that never goes quiet, or a jammed band — or a receiver stuck
+// believing it hears a preamble — stalls every queue on the node for good.
+constexpr uint32_t kChannelBusyMaxMs = 4000;
+
 // How often to look again when the radio is down. Anything still queued when it
 // comes back goes out; anything that expired meanwhile was already dropped.
 constexpr uint32_t kRadioDownRecheckMs = 1000;
@@ -83,6 +95,9 @@ void Dispatcher::log_rf_summary() const {
              "(%u header, %u CRC, %u timeout); last rssi %d snr %.1f",
              stats_.rx_total, stats_.rx_dup, failed, stats_.rx_header_err, stats_.rx_crc_err,
              stats_.rx_timeout, stats_.last_rssi, static_cast<double>(stats_.last_snr));
+    LOG_INFO("radio: sent %u packets, %u dropped, %u held for a busy channel "
+             "(%u sent over one anyway)",
+             stats_.tx_total, stats_.tx_dropped, stats_.tx_deferred, stats_.tx_forced);
 }
 
 void Dispatcher::on_radio_rx(radio::RxPacket&& rx) {
@@ -250,6 +265,23 @@ void Dispatcher::pump() {
         schedule_pump(std::min(wait, 30000u));
         return;
     }
+
+    // Listen before transmitting. send() begins with SetStandby, so keying up
+    // over a reception in progress destroys the packet we were half way through
+    // receiving as well as corrupting it for whoever sent it.
+    if (radio_.channel_busy()) {
+        if (busy_since_ms_ == 0) busy_since_ms_ = now;
+        if (now - busy_since_ms_ < kChannelBusyMaxMs) {
+            stats_.tx_deferred++;
+            uint8_t r = 0;
+            crypto::random_bytes(ByteSpan(&r, 1));
+            schedule_pump(kChannelBusyRetryMs + (r % kChannelBusyJitterMs));
+            return;
+        }
+        LOG_WARN("tx: channel busy for %u ms, transmitting anyway", now - busy_since_ms_);
+        stats_.tx_forced++;
+    }
+    busy_since_ms_ = 0;
 
     Queued q = std::move(*it);
     queue_.erase(it);

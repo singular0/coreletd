@@ -43,6 +43,7 @@ public:
     bool send(ByteView data) override;
     bool ready() const override { return healthy_; }
     bool tx_busy() const override { return tx_busy_; }
+    bool channel_busy() override;
     const RadioParams& params() const override { return params_; }
     std::string describe() const override;
 
@@ -74,6 +75,7 @@ private:
     bool set_modulation();
     bool set_packet_params(uint8_t payload_len);
     bool set_rx_mode();
+    uint32_t symbols_ms(uint32_t symbols) const;
 
     // --- interrupt handling ---
     void on_irq();
@@ -103,6 +105,9 @@ private:
 
     bool tx_busy_ = false;
     uint32_t tx_started_ms_ = 0;
+    // When the preamble or header flag was first seen set, so a reception that
+    // never completes cannot latch the channel busy forever.
+    uint32_t rx_since_ms_ = 0;
     bool healthy_ = false;
     bool recovering_ = false;
     bool ever_healthy_ = false;

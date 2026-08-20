@@ -44,6 +44,10 @@ public:
         deliver_rx(radio::RxPacket {std::move(data), rssi, snr, loop_ ? loop_->now_ms() : 0});
     }
 
+    // A reception the modem started and abandoned: no payload, just the fact
+    // that something was on the air and could not be read.
+    void inject_error(radio::RxError e) { deliver_rx_error(e); }
+
     size_t send_count() const { return send_count_; }
     const Bytes& last_sent() const { return last_sent_; }
 

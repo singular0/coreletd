@@ -16,6 +16,11 @@ struct RxPacket {
     uint32_t rx_millis = 0;
 };
 
+// Why the demodulator gave up on a reception. There is no payload to hand up,
+// but the rate matters: a receiver locking onto preambles it cannot read looks
+// exactly like an idle band unless somebody counts these.
+enum class RxError { HeaderError, CrcError, Timeout };
+
 // Defaults are MeshCore's on-air settings. Frequency deliberately has no
 // default: the region is a legal question, so the config file must state it.
 struct RadioParams {
@@ -37,6 +42,7 @@ struct RadioParams {
 class Radio {
 public:
     using RxHandler = std::function<void(RxPacket&&)>;
+    using RxErrorHandler = std::function<void(RxError)>;
     using TxDoneHandler = std::function<void(uint32_t airtime_ms)>;
 
     virtual ~Radio() = default;
@@ -58,6 +64,7 @@ public:
     virtual std::string describe() const = 0;
 
     void set_rx_handler(RxHandler h) { on_rx_ = std::move(h); }
+    void set_rx_error_handler(RxErrorHandler h) { on_rx_error_ = std::move(h); }
     void set_tx_done_handler(TxDoneHandler h) { on_tx_done_ = std::move(h); }
 
     // LoRa time-on-air for a payload of `bytes`, used for duty-cycle
@@ -68,12 +75,16 @@ protected:
     void deliver_rx(RxPacket&& p) {
         if (on_rx_) on_rx_(std::move(p));
     }
+    void deliver_rx_error(RxError e) {
+        if (on_rx_error_) on_rx_error_(e);
+    }
     void deliver_tx_done(uint32_t airtime) {
         if (on_tx_done_) on_tx_done_(airtime);
     }
 
 private:
     RxHandler on_rx_;
+    RxErrorHandler on_rx_error_;
     TxDoneHandler on_tx_done_;
 };
 

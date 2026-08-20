@@ -722,19 +722,19 @@ void Sx1262::on_irq() {
         if (!healthy_) return;
     }
 
-    if (irq & kIrqRxDone) {
-        // A CRC error means the packet is corrupt; count it and re-arm rather
-        // than handing garbage up the stack.
-        if (irq & (kIrqCrcErr | kIrqHeaderErr)) {
-            LOG_DEBUG("sx1262: dropping packet with %s",
-                      (irq & kIrqCrcErr) ? "CRC error" : "header error");
-            if (!set_rx_mode()) fail("returning to RX after a corrupt packet");
-        } else {
-            handle_rx_done();
-        }
-    } else if (irq & (kIrqCrcErr | kIrqHeaderErr | kIrqTimeout)) {
-        if (!set_rx_mode()) fail("returning to RX after an RX error");
+    if (irq & (kIrqCrcErr | kIrqHeaderErr | kIrqTimeout)) {
+        // A failed reception usually arrives with no RxDone bit at all: the
+        // demodulator locked onto a preamble and gave up before the packet was
+        // complete. Report it either way, because the rate of these is the only
+        // thing that separates a deaf receiver from a quiet band.
+        deliver_rx_error(irq & kIrqCrcErr      ? RxError::CrcError
+                         : irq & kIrqHeaderErr ? RxError::HeaderError
+                                               : RxError::Timeout);
+        if (!set_rx_mode()) fail("returning to RX after a failed reception");
+        return;
     }
+
+    if (irq & kIrqRxDone) handle_rx_done();
 }
 
 void Sx1262::handle_tx_done() {

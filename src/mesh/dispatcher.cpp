@@ -23,6 +23,11 @@ constexpr uint32_t kExpiryPerPriorityMs = 10000;
 // repeat it in the same instant.
 constexpr uint32_t kJitterMs = 400;
 
+// How often to report what the receiver has been hearing. An operator with no
+// traffic needs to know whether the band is quiet or the antenna is deaf, and
+// the two are indistinguishable without a running count of failed receptions.
+constexpr uint32_t kRfSummaryMs = 300000;
+
 // How often to look again when the radio is down. Anything still queued when it
 // comes back goes out; anything that expired meanwhile was already dropped.
 constexpr uint32_t kRadioDownRecheckMs = 1000;
@@ -42,13 +47,42 @@ Dispatcher::Dispatcher(EventLoop& loop, radio::Radio& radio, size_t queue_limit)
 
 bool Dispatcher::start(std::string& error) {
     radio_.set_rx_handler([this](radio::RxPacket&& rx) { on_radio_rx(std::move(rx)); });
+    radio_.set_rx_error_handler([this](radio::RxError e) { on_radio_rx_error(e); });
     radio_.set_tx_done_handler([this](uint32_t airtime) { on_radio_tx_done(airtime); });
 
     if (!radio_.begin(loop_, error)) return false;
 
     // Periodic sweep so the dedup table cannot grow without bound on a busy mesh.
     seen_sweep_ = loop_.add_repeating(kSeenTtlMs, [this] { expire_seen(); });
+    rf_summary_ = loop_.add_repeating(kRfSummaryMs, [this] { log_rf_summary(); });
     return true;
+}
+
+void Dispatcher::on_radio_rx_error(radio::RxError e) {
+    const char* what = "timed out";
+    switch (e) {
+        case radio::RxError::HeaderError:
+            stats_.rx_header_err++;
+            what = "failed the header";
+            break;
+        case radio::RxError::CrcError:
+            stats_.rx_crc_err++;
+            what = "failed CRC";
+            break;
+        case radio::RxError::Timeout:
+            stats_.rx_timeout++;
+            break;
+    }
+    LOG_DEBUG("rx: reception %s, nothing decoded (%u decoded, %u failed so far)", what,
+              stats_.rx_total, stats_.rx_header_err + stats_.rx_crc_err + stats_.rx_timeout);
+}
+
+void Dispatcher::log_rf_summary() const {
+    const uint32_t failed = stats_.rx_header_err + stats_.rx_crc_err + stats_.rx_timeout;
+    LOG_INFO("radio: heard %u packets (%u duplicate), %u failed to decode "
+             "(%u header, %u CRC, %u timeout); last rssi %d snr %.1f",
+             stats_.rx_total, stats_.rx_dup, failed, stats_.rx_header_err, stats_.rx_crc_err,
+             stats_.rx_timeout, stats_.last_rssi, static_cast<double>(stats_.last_snr));
 }
 
 void Dispatcher::on_radio_rx(radio::RxPacket&& rx) {

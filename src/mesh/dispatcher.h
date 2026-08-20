@@ -24,6 +24,12 @@ struct DispatcherStats {
     uint32_t rx_total = 0;
     uint32_t rx_dup = 0;
     uint32_t rx_bad = 0;
+    // Receptions the modem started and could not finish. Nothing reaches the
+    // stack from these, so they are the only evidence that the band is busy
+    // but unreadable — a desensitised receiver rather than an idle mesh.
+    uint32_t rx_header_err = 0;
+    uint32_t rx_crc_err = 0;
+    uint32_t rx_timeout = 0;
     uint32_t rx_flood = 0;
     uint32_t rx_direct = 0;
     uint32_t tx_total = 0;
@@ -83,7 +89,9 @@ private:
     };
 
     void on_radio_rx(radio::RxPacket&& rx);
+    void on_radio_rx_error(radio::RxError e);
     void on_radio_tx_done(uint32_t airtime_ms);
+    void log_rf_summary() const;
     void pump();
     void schedule_pump(uint32_t delay_ms);
     void expire_seen();
@@ -96,6 +104,7 @@ private:
     size_t queue_limit_;
     uint64_t next_seq_ = 0;
     EventLoop::Timer seen_sweep_;
+    EventLoop::Timer rf_summary_;
     EventLoop::Timer pump_timer_;
     uint32_t pump_due_ms_ = 0;
 

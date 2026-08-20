@@ -398,6 +398,30 @@ static void test_dispatch_result_waits_for_actual_transmission() {
     CHECK_EQ(dispatcher.queue_depth(), size_t {1});
 }
 
+// A desensitised receiver and an idle band both deliver no packets. What tells
+// them apart is the count of receptions the modem began and could not finish,
+// so those must reach the statistics rather than being dropped in the driver.
+static void test_failed_receptions_are_counted_separately() {
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher(loop, radio);
+    std::string error;
+    CHECK(dispatcher.start(error));
+
+    radio.inject_error(radio::RxError::HeaderError);
+    radio.inject_error(radio::RxError::HeaderError);
+    radio.inject_error(radio::RxError::CrcError);
+    radio.inject_error(radio::RxError::Timeout);
+
+    const auto& s = dispatcher.stats();
+    CHECK_EQ(s.rx_header_err, uint32_t {2});
+    CHECK_EQ(s.rx_crc_err, uint32_t {1});
+    CHECK_EQ(s.rx_timeout, uint32_t {1});
+    // Nothing was demodulated, so none of this counts as a packet heard.
+    CHECK_EQ(s.rx_total, uint32_t {0});
+    CHECK_EQ(s.rx_bad, uint32_t {0});
+}
+
 static void test_identical_pending_messages_are_coalesced() {
     auto self = crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA));
     if (!self) return;
@@ -898,6 +922,7 @@ int main() {
     test_duty_cycle_includes_candidate_airtime();
     test_duty_cycle_budget_returns_with_the_window();
     test_dispatch_result_waits_for_actual_transmission();
+    test_failed_receptions_are_counted_separately();
     test_identical_pending_messages_are_coalesced();
     test_earlier_pump_replaces_later_timer();
     test_dispatch_queue_drops_lowest_priority();

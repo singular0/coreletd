@@ -226,8 +226,17 @@ std::optional<TextMessage> TextMessage::decode(ByteView plaintext) {
     m.txt_type = static_cast<uint8_t>(type_and_attempt >> 2);
     m.attempt = static_cast<uint8_t>(type_and_attempt & 0x03);
 
-    ByteView body = strip_zero_padding(r.rest());
-    m.text.assign(body.begin(), body.end());
+    // The text is a C string: it ends at the first NUL, and anything after
+    // that is either AES padding or the extended attempt byte. Stripping
+    // trailing zeros instead would hand the app "text\0<attempt>" whenever the
+    // sender was past its third try.
+    ByteView rest = r.rest();
+    size_t end = 0;
+    while (end < rest.size() && rest[end] != 0) end++;
+    m.text.assign(rest.begin(), rest.begin() + end);
+    // MeshCore reads this byte unconditionally, so on a padded message it is
+    // simply zero.
+    if (end + 1 < rest.size()) m.extended_attempt = rest[end + 1];
     return m;
 }
 
@@ -255,13 +264,39 @@ ByteView strip_zero_padding(ByteView plaintext) {
     return subview(plaintext, 0, n);
 }
 
+// timestamp(4) + flags(1). An empty body hashes exactly this much.
+constexpr size_t kTextHeaderSize = 5;
+
+ByteView ack_hashed_region(ByteView plaintext) {
+    if (plaintext.size() <= kTextHeaderSize) return plaintext;
+    size_t end = kTextHeaderSize;
+    while (end < plaintext.size() && plaintext[end] != 0) end++;
+    return subview(plaintext, 0, end);
+}
+
+uint8_t ack_extended_attempt(ByteView plaintext) {
+    const size_t after_nul = ack_hashed_region(plaintext).size() + 1;
+    return after_nul < plaintext.size() ? plaintext[after_nul] : 0;
+}
+
 Bytes message_ack_hash(ByteView plaintext, ByteView pubkey) {
-    ByteView stripped = strip_zero_padding(plaintext);
+    ByteView hashed = ack_hashed_region(plaintext);
     Bytes buf;
-    buf.reserve(stripped.size() + pubkey.size());
-    put_bytes(buf, stripped);
+    buf.reserve(hashed.size() + pubkey.size());
+    put_bytes(buf, hashed);
     put_bytes(buf, pubkey);
     return crypto::ack_hash(buf);
+}
+
+Bytes ack_payload(ByteView ack_hash, uint8_t extended_attempt) {
+    Bytes out;
+    out.reserve(crypto::kAckHashSize + 2);
+    put_bytes(out, subview(ack_hash, 0, crypto::kAckHashSize));
+    out.push_back(extended_attempt);
+    uint8_t r = 0;
+    crypto::random_bytes(ByteSpan(&r, 1));
+    out.push_back(r);
+    return out;
 }
 
 std::optional<PathReturn> PathReturn::decode(ByteView plaintext) {

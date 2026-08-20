@@ -167,6 +167,77 @@ static void test_ack_packet() {
     CHECK_BYTES(p->encode(), raw);
 }
 
+// The hashed region is bounded by the text's NUL terminator, which is not the
+// same rule as dropping trailing zeros. These are the two cases where the
+// answers differ, and an ack that hashes the wrong bytes never matches — on the
+// air that is indistinguishable from a message that never arrived.
+static void test_ack_region_of_an_empty_body_is_just_the_header() {
+    // timestamp(4) + flags(1) + AES padding, with no text at all.
+    Bytes plaintext {0x00, 0x11, 0x22, 0x33, 0x00};
+    plaintext.resize(16, 0);
+
+    // MeshCore hashes 5 bytes here. Stripping trailing zeros would eat the
+    // flags byte and then the leading zero byte of the timestamp, leaving 4.
+    CHECK_EQ(ack_hashed_region(plaintext).size(), size_t {5});
+    CHECK_EQ(strip_zero_padding(plaintext).size(), size_t {4});
+    CHECK_EQ(ack_extended_attempt(plaintext), uint8_t {0});
+}
+
+static void test_ack_region_stops_before_the_extended_attempt() {
+    // timestamp(4) + flags(1) + "hi" + NUL + attempt 7, as MeshCore writes a
+    // retry once the two bits in the flags byte have run out.
+    Bytes plaintext {0x01, 0x02, 0x03, 0x04, 0x03};
+    put_bytes(plaintext, from_str("hi"));
+    plaintext.push_back(0x00);
+    plaintext.push_back(0x07);
+
+    CHECK_EQ(ack_hashed_region(plaintext).size(), size_t {7});  // 5 + strlen("hi")
+    CHECK_EQ(ack_extended_attempt(plaintext), uint8_t {7});
+    // Stripping trailing zeros keeps the whole thing, because the attempt byte
+    // is not zero: two bytes too many, and a hash that cannot match.
+    CHECK_EQ(strip_zero_padding(plaintext).size(), size_t {9});
+
+    // And those two bytes must not reach the app as message text.
+    auto msg = TextMessage::decode(plaintext);
+    CHECK(msg.has_value());
+    if (msg) {
+        CHECK(msg->body() == "hi");
+        CHECK_EQ(msg->extended_attempt, uint8_t {7});
+    }
+}
+
+// Padding is not an extended attempt: the byte after the terminator is simply
+// zero on an ordinary message, which is what MeshCore reads there too.
+static void test_padded_message_has_no_extended_attempt() {
+    Bytes plaintext {0x01, 0x02, 0x03, 0x04, 0x00};
+    put_bytes(plaintext, from_str("hello"));
+    plaintext.resize(16, 0);
+
+    CHECK_EQ(ack_hashed_region(plaintext).size(), size_t {10});
+    CHECK_EQ(ack_extended_attempt(plaintext), uint8_t {0});
+    auto msg = TextMessage::decode(plaintext);
+    CHECK(msg.has_value());
+    if (msg) CHECK(msg->body() == "hello");
+}
+
+// Two acks for the same message must not be the same packet, or every repeater
+// in between suppresses the second as a duplicate and a retry's ack gets one
+// chance to cross the mesh.
+static void test_ack_payload_is_unique_per_send() {
+    const Bytes hash = from_hex(pv::kTextAckHash);
+    Bytes first = ack_payload(hash, 5);
+    CHECK_EQ(first.size(), size_t {6});
+    CHECK_BYTES(subview(first, 0, 4), hash);
+    CHECK_EQ(first[4], uint8_t {5});
+
+    // The sixth byte is random, so a repeat is overwhelmingly likely to differ.
+    bool differed = false;
+    for (int i = 0; i < 32 && !differed; i++) {
+        if (ack_payload(hash, 5) != first) differed = true;
+    }
+    CHECK(differed);
+}
+
 static void test_path_encoding() {
     // path_length packs hop count in bits 0-5 and (hash size - 1) in bits 6-7.
     Packet p;
@@ -305,6 +376,10 @@ int main() {
     test_text_packet();
     test_text_encrypt_roundtrip();
     test_ack_packet();
+    test_ack_region_of_an_empty_body_is_just_the_header();
+    test_ack_region_stops_before_the_extended_attempt();
+    test_padded_message_has_no_extended_attempt();
+    test_ack_payload_is_unique_per_send();
     test_path_encoding();
     test_path_manipulation();
     test_transport_codes();

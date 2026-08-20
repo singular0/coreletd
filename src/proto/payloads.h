@@ -116,6 +116,11 @@ struct TextMessage {
     uint32_t timestamp = 0;
     uint8_t txt_type = kTxtPlain;
     uint8_t attempt = 0;
+    // The flags byte only has two bits for the attempt, so MeshCore writes the
+    // real number in a byte past the text's NUL terminator once it goes above
+    // three. It is echoed back in the ack, which is what makes a fourth retry's
+    // ack different from a third's.
+    uint8_t extended_attempt = 0;
     // For kTxtSignedPlain the first 4 bytes of `text` are the sender's pubkey
     // prefix; `sender_prefix()` splits it out.
     Bytes text;
@@ -127,14 +132,36 @@ struct TextMessage {
     std::string body() const;
 };
 
-// Trailing zero bytes are AES padding, not message content. MeshCore strips
-// them before hashing, so we must too or acks will never match.
+// Trailing zero bytes are AES padding, not message content.
 ByteView strip_zero_padding(ByteView plaintext);
 
-// SHA-256(plaintext_without_padding || pubkey)[0..4].
+// The bytes an ack hash covers: timestamp(4) + flags(1) + strlen(text).
+//
+// Not the same rule as "drop the trailing zeros". MeshCore hashes a C string in
+// a fixed buffer, so the region ends at the first NUL after the header, and the
+// two answers differ in both directions. An empty body leaves MeshCore hashing
+// the 5-byte header while stripping would eat the zero flags byte and then the
+// high bytes of the timestamp; a retry above attempt 3 puts a NUL and the real
+// attempt number after the text, which stripping keeps because the attempt byte
+// is not zero. Either way the hash does not match, and an ack that never
+// matches is indistinguishable on the air from a message that never arrived.
+ByteView ack_hashed_region(ByteView plaintext);
+
+// The attempt byte MeshCore echoes as the fifth byte of an ack: the one after
+// the text's NUL terminator, or zero when the message is padded out instead.
+uint8_t ack_extended_attempt(ByteView plaintext);
+
+// SHA-256(ack_hashed_region || pubkey)[0..4].
 // `pubkey` is the message author's for plain text, but the *recipient's* for
 // signed/room-server messages.
 Bytes message_ack_hash(ByteView plaintext, ByteView pubkey);
+
+// The six bytes MeshCore puts in an ack packet: the hash, the extended attempt
+// byte, and one random byte. Receivers compare only the first four; the other
+// two exist to make the packet unique, because two acks for the same message
+// would otherwise be byte-identical and every repeater between here and the
+// sender would drop the second as a duplicate.
+Bytes ack_payload(ByteView ack_hash, uint8_t extended_attempt);
 
 struct PathReturn {
     Bytes path;

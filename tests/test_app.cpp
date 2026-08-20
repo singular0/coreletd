@@ -187,7 +187,8 @@ static void test_received_text_is_acked_on_air() {
     CHECK(sent.has_value());
     if (!sent) return;
     CHECK(sent->type == proto::PayloadType::Ack);
-    CHECK_BYTES(sent->payload, from_hex(pv::kTextAckHash));
+    CHECK_EQ(sent->payload.size(), size_t {6});
+    CHECK_BYTES(subview(sent->payload, 0, 4), from_hex(pv::kTextAckHash));
 
     // Shutting down flushes what the exchange changed, so the contact A
     // advertised is on disk under the name it advertised.
@@ -376,7 +377,10 @@ static void test_corrupt_contacts_recover_from_the_backup() {
     CHECK(sent.has_value());
     if (sent) {
         CHECK(sent->type == proto::PayloadType::Ack);
-        CHECK_BYTES(sent->payload, from_hex(pv::kTextAckHash));
+        // Six bytes now: the hash, the extended attempt byte, and a random one
+        // so two acks for the same message are not the same packet.
+        CHECK_EQ(sent->payload.size(), size_t {6});
+        CHECK_BYTES(subview(sent->payload, 0, 4), from_hex(pv::kTextAckHash));
     }
     app.request_stop();
 }

@@ -230,14 +230,15 @@ void Node::handle_text(const proto::Packet& p) {
     if (msg->txt_type != proto::kTxtCliData) {
         ByteView ack_key =
             msg->txt_type == proto::kTxtSignedPlain ? self_.pub() : ByteView(from->pubkey);
-        send_ack(*from, proto::message_ack_hash(plaintext, ack_key));
+        send_ack(*from, proto::message_ack_hash(plaintext, ack_key),
+                 proto::ack_extended_attempt(plaintext));
     }
 }
 
-void Node::send_ack(const Contact& to, ByteView ack_hash) {
+void Node::send_ack(const Contact& to, ByteView ack_hash, uint8_t extended_attempt) {
     proto::Packet p;
     p.type = proto::PayloadType::Ack;
-    p.payload.assign(ack_hash.begin(), ack_hash.end());
+    p.payload = proto::ack_payload(ack_hash, extended_attempt);
 
     LOG_DEBUG("ack: sending %s", hex(ack_hash).c_str());
     route_to(dispatcher_, p, to, kPriorityAck);

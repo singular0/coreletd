@@ -103,7 +103,7 @@ private:
     Contact* decrypt_from(uint8_t src_hash, ByteView mac, ByteView ciphertext, Bytes& plaintext);
 
     void store_message(StoredMessage msg);
-    void send_ack(const Contact& to, ByteView ack_hash);
+    void send_ack(const Contact& to, ByteView ack_hash, uint8_t extended_attempt);
     void record_return_path(Contact& c, const proto::Packet& p);
 
     proto::AdvertAppData build_appdata() const;

@@ -78,8 +78,8 @@ DEFAULTS = dict(
     busy_pin=24,
     reset_pin=25,
     channel_slot=3,             # low enough to exist on both, high enough to be spare
-    lora_on_cmd="python3 ~/aiov2_ctl/aiov2_ctl.py LORA on",
-    lora_status_cmd="python3 ~/aiov2_ctl/aiov2_ctl.py --status",
+    lora_on_cmd="aiov2_ctl LORA on",
+    lora_status_cmd="aiov2_ctl --status",
 )
 
 # How long each kind of step is given before it is called a failure. Radio

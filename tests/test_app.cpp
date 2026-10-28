@@ -211,12 +211,14 @@ static void test_received_text_is_acked_on_air() {
     // The reply needs no timer to get out: the radio is ready and nothing is
     // queued ahead of it. The reference packet is flood-routed, so the reply is
     // a PATH return teaching A the way back, with the ack riding inside it
-    // rather than costing a second transmission.
+    // rather than costing a second transmission — and flooded, as MeshCore
+    // floods it, since A's advert taught us no route to A either.
     CHECK_EQ(air->send_count(), size_t {1});
     auto sent = proto::Packet::decode(air->last_sent());
     CHECK(sent.has_value());
     if (!sent) return;
     check_bundled_ack(*sent, pv::kTextAckHash);
+    CHECK(sent->is_flood());
 
     // Shutting down flushes what the exchange changed, so the contact A
     // advertised is on disk under the name it advertised.

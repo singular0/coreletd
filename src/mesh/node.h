@@ -14,8 +14,9 @@
 namespace clt::mesh {
 
 // Routes between the radio and the companion app: builds our adverts, decides
-// what each received payload means, and repeats flood traffic. Reliable
-// delivery lives in ReliableSender and the receive queue in MessageInbox.
+// what each received payload means, and — when relaying is on — repeats flood
+// traffic and forwards the direct traffic routed through us. Reliable delivery
+// lives in ReliableSender and the receive queue in MessageInbox.
 class Node {
 public:
     struct Config {
@@ -27,7 +28,11 @@ public:
         // 0 disables automatic adverts; MeshCore nodes typically re-advertise
         // every few hours so the mesh keeps fresh routes.
         uint32_t advert_interval_s = 0;
-        // Repeat other nodes' flood traffic. Off for a plain companion radio.
+        // Relay for other nodes: repeat their flood traffic and forward the
+        // direct packets whose next hop is us. Off for a plain companion radio.
+        // The two come as a pair — a node that appends its hash to flood paths
+        // ends up on the routes peers build from them, and must then carry what
+        // they send along those routes.
         bool repeat = false;
         uint8_t max_hops = 32;
         uint32_t message_queue_limit = 256;
@@ -93,12 +98,25 @@ public:
 private:
     void on_packet(proto::Packet&& p);
 
-    void handle_advert(const proto::Packet& p);
-    void handle_text(const proto::Packet& p);
-    void handle_ack(const proto::Packet& p);
-    void handle_path(const proto::Packet& p);
+    // Each returns whether MeshCore would flood the packet onward afterwards:
+    // false for one that turned out to be for us, and for one it would not
+    // route at all. Relaying is the only thing that reads the answer.
+    bool handle_advert(const proto::Packet& p);
+    bool handle_text(const proto::Packet& p);
+    bool handle_ack(const proto::Packet& p);
+    bool handle_path(const proto::Packet& p);
     void handle_group_text(const proto::Packet& p);
+    // REQ, RESPONSE and ANON_REQ: none answered by a companion node, but
+    // opened all the same to learn whether they were for us.
+    bool handle_request(const proto::Packet& p);
     void maybe_repeat(const proto::Packet& p);
+    // A direct-routed packet with hops left on its path, when relaying is on
+    // and the next of them is us.
+    void forward_direct(const proto::Packet& p);
+    // A trace whose route names us next, when relaying is on.
+    void forward_trace(const proto::Packet& p);
+    // How long a forwarded direct packet waits before it goes on.
+    uint32_t direct_retransmit_delay(const proto::Packet& out);
 
     // Tries every contact whose id matches the source hash until one decrypts.
     Contact* decrypt_from(uint8_t src_hash, ByteView mac, ByteView ciphertext, Bytes& plaintext);
@@ -110,14 +128,24 @@ private:
     bool first_delivery(const Contact& from, const proto::TextMessage& msg);
     void expire_delivered();
 
+    // Completes the pending send `ack_hash` answers, if there is one, and tells
+    // the app. `matched` reports whether there was; the contact comes back
+    // separately because it can have been removed since the send.
+    Contact* complete_ack(ByteView ack_hash, bool direct, bool& matched);
+
     void store_message(StoredMessage msg);
     void send_ack(const Contact& to, ByteView ack);
+
+    // A direct route for a path return to travel. Without one it is flooded.
+    struct Via {
+        Bytes path;
+        uint8_t hash_size = 1;
+    };
     // Tells `to` how to reach us: the path `inbound` arrived by, unreversed and
     // encrypted to that contact. `extra` rides inside it — an ack, normally,
     // which is how answering a flood-routed message still costs one packet.
-    void send_path_return(Contact& to, const proto::Packet& inbound, uint8_t extra_type,
-                          ByteView extra);
-    void record_return_path(Contact& c, const proto::Packet& p);
+    void send_path_return(const Contact& to, const proto::Packet& inbound, uint8_t extra_type,
+                          ByteView extra, std::optional<Via> via, uint32_t delay_ms = 0);
 
     proto::AdvertAppData build_appdata() const;
 

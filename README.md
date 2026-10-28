@@ -40,8 +40,9 @@ Unchecked boxes are not implemented — use different firmware for those.
 - [x] Encrypted direct messages, with acknowledgements, retries and automatic fallback to flood
       when a known route stops working.
 - [x] Channel (group) messages — the public channel, hashtag channels and private ones.
-- [x] Flood repeating for other nodes' traffic, off by default: repeating on a companion radio
-      spends your duty-cycle budget and your battery on other people's packets.
+- [x] Relaying for other nodes, off by default: flood traffic repeated and direct traffic routed
+      through this node forwarded, as a MeshCore companion with repeat enabled does. Relaying on a
+      companion radio spends your duty-cycle budget and your battery on other people's packets.
 - [x] Duty-cycle pacing, and a priority transmit queue so an ack is never stuck behind an advert.
 - [ ] Repeater and room-server roles. It is a companion node today; whether it grows into those is
       undecided.

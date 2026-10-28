@@ -28,14 +28,18 @@ Common variations:
     tools/hw_e2e_test.py --list                # what the phases are
     tools/hw_e2e_test.py --keep-running        # leave daemon + tunnel up
     tools/hw_e2e_test.py --peer t-echo         # when several radios are in range
+    tools/hw_e2e_test.py --with-relay          # also relay through coreletd
 
 Exit status is 0 only if every check passed. Nothing is left running unless
---keep-running is given, and the peer's own state is not modified: the only
-write to it is the optional channel slot in --with-channel, which is restored.
+--keep-running is given. The peer's own state is left alone but for two things:
+its route to this test node, which message_rx and relay forget so that the
+flood exchange runs every time (the exchange teaches it again), and the
+optional channel slot in --with-channel, which is restored.
 
 Requirements on this machine: python3, ssh (keys configured), rsync, and
-meshcore-cli (`pipx install meshcore-cli`). On the uConsole: cmake, g++ and the
-build dependencies, plus the LoRa rail powered — see --lora-on-cmd.
+meshcore-cli (`pipx install meshcore-cli`); the relay phase also uses the
+meshcore library installed with it. On the uConsole: cmake, g++ and the build
+dependencies, plus the LoRa rail powered — see --lora-on-cmd.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -102,6 +107,14 @@ ACK_WAITS = 2
 # One BLE scan, in preflight. Longer than meshcore-cli's 2 s default: this runs
 # once and the whole run depends on it finding the radio.
 SCAN_SECS = 6
+# Between the packets of a relay probe. Half duplex: a peer still sending its
+# next packet cannot hear our relay of the last one, and an advert alone is over
+# a second of air at SF8 / 62.5 kHz.
+RELAY_GAP_S = 4
+# How long the peer keeps listening after its last packet. A forward waits up
+# to one packet's airtime and a flood repeat up to 1.1 s, both behind whatever
+# else is on the air.
+RELAY_LISTEN_S = 8
 
 # ---------------------------------------------------------------------------
 # Reporting
@@ -357,6 +370,118 @@ class Node:
 
 
 # ---------------------------------------------------------------------------
+# Talking to the peer below meshcore-cli
+# ---------------------------------------------------------------------------
+
+# The relay phase needs two things meshcore-cli has no command for: the raw
+# frames the peer's radio hears, and a direct packet sent down a path of our
+# choosing. MeshCore pushes every frame it hears to the connected app before it
+# deduplicates, so the peer hears its own packet come back from a relay; and its
+# CMD_SEND_RAW_DATA sends a payload along any path. Both are in the meshcore
+# library meshcore-cli is built on, so this runs in meshcore-cli's interpreter:
+# it connects, runs the steps it is given, listens on, and prints one JSON
+# document of everything the peer heard.
+PEER_SESSION = r"""
+import asyncio
+import json
+import sys
+
+from meshcore import EventType, MeshCore
+
+
+async def main(spec):
+    address = spec["address"]
+    client = None
+    if len(address) == 36 and address.count("-") == 4:
+        # macOS names a BLE device by CoreBluetooth UUID, which the library
+        # takes only as a ready-made client.
+        from bleak import BleakClient
+        client = BleakClient(address)
+    mc = await MeshCore.create_ble(address=address, client=client, only_error=True)
+    if mc is None:
+        raise SystemExit("could not connect to " + address)
+
+    heard, traces, steps = [], [], []
+    mc.subscribe(EventType.RX_LOG_DATA, lambda e: heard.append(
+        {"raw": e.payload.get("payload", ""), "snr": e.payload.get("snr"),
+         "rssi": e.payload.get("rssi")}))
+    mc.subscribe(EventType.TRACE_DATA, lambda e: traces.append(e.payload))
+
+    for op, *args in spec["steps"]:
+        if op == "sleep":
+            await asyncio.sleep(args[0])
+            continue
+        if op == "advert":
+            res = await mc.commands.send_advert(flood=True)
+        elif op == "raw":
+            res = await mc.commands.send_raw_data(bytes.fromhex(args[1]), bytes.fromhex(args[0]))
+        elif op == "trace":
+            res = await mc.commands.send_trace(auth_code=0, tag=args[2], flags=args[1],
+                                               path=bytes.fromhex(args[0]))
+        elif op == "reset_path":
+            res = await mc.commands.reset_path(args[0])
+        elif op == "msg":
+            res = await mc.commands.send_msg(args[0], args[1])
+        else:
+            raise SystemExit("unknown step " + op)
+        steps.append({"step": op, "ok": res.type != EventType.ERROR, "detail": res.payload})
+
+    await asyncio.sleep(spec["listen"])
+    await mc.disconnect()
+    print(json.dumps({"heard": heard, "traces": traces, "steps": steps}, default=str))
+
+
+asyncio.run(main(json.loads(sys.argv[1])))
+"""
+
+PAYLOAD_TXT_MSG = 0x02
+PAYLOAD_ADVERT = 0x04
+PAYLOAD_PATH = 0x08
+PAYLOAD_RAW_CUSTOM = 0x0F
+PAYLOAD_NAMES = {0x00: "REQ", 0x01: "RESPONSE", 0x02: "TXT_MSG", 0x03: "ACK", 0x04: "ADVERT",
+                 0x05: "GRP_TXT", 0x06: "GRP_DATA", 0x07: "ANON_REQ", 0x08: "PATH",
+                 0x09: "TRACE", 0x0A: "MULTIPART", 0x0B: "CONTROL", 0x0F: "RAW_CUSTOM"}
+
+
+@dataclass
+class Frame:
+    """One packet the peer's radio heard, decoded just far enough to say who
+    relayed it. Decoded here rather than by the library, whose reading of a
+    path is the thing under test."""
+
+    kind: int
+    flood: bool
+    hops: list[str]
+    payload: str
+    rssi: int | None
+    snr: float | None
+
+    @classmethod
+    def parse(cls, heard: dict) -> Frame | None:
+        try:
+            raw = bytes.fromhex(heard.get("raw") or "")
+        except ValueError:
+            return None
+        if len(raw) < 2:
+            return None
+        route = raw[0] & 0x03
+        at = 5 if route in (0, 3) else 1  # the transport routes carry two codes first
+        if len(raw) <= at:
+            return None
+        width, count = (raw[at] >> 6) + 1, raw[at] & 0x3F
+        path = raw[at + 1:at + 1 + width * count]
+        return cls(kind=(raw[0] >> 2) & 0x0F, flood=route in (0, 1),
+                   hops=[path[k:k + width].hex() for k in range(0, len(path), width)],
+                   payload=raw[at + 1 + width * count:].hex(),
+                   rssi=heard.get("rssi"), snr=heard.get("snr"))
+
+    def describe(self) -> str:
+        return (f"{PAYLOAD_NAMES.get(self.kind, hex(self.kind))} "
+                f"{'flood' if self.flood else 'direct'} via [{','.join(self.hops)}] "
+                f"at {self.rssi} dBm")
+
+
+# ---------------------------------------------------------------------------
 # The harness
 # ---------------------------------------------------------------------------
 
@@ -445,6 +570,98 @@ class Harness:
         self.peer.transport = ["-a", address]
         extra = f" (of {len(devices)} in range)" if len(devices) > 1 else ""
         return f"{name} at {address}{extra}"
+
+    def forget_routes(self) -> dict:
+        """Both ends forget their route to the other; returns the peer's contact.
+
+        The identity is kept between runs, and so is the peer's contact for it,
+        route and all — so left alone the peer would send direct every time
+        after the first run ever, and the flood exchange, which is the only
+        thing that teaches either end a route, would go untested. This touches
+        the peer's contact for this test node and nothing else, and the
+        exchange that follows teaches it the route again.
+        """
+        self.peer.cli("reset_path", self.uconsole_key[:12], expect=False)
+        self.uconsole.cli("reset_path", self.peer_key[:12], expect=False)
+        return self.peer.find_contact(self.uconsole_key[:12]) or {}
+
+    def meshcore_python(self) -> str:
+        """An interpreter that can import the meshcore library.
+
+        meshcore-cli is normally a pipx install, whose launcher sits beside the
+        python of its own environment, and that is where the library is.
+        """
+        if getattr(self, "_meshcore_python", ""):
+            return self._meshcore_python
+        candidates = [sys.executable]
+        launcher = shutil.which("meshcore-cli")
+        if launcher:
+            bindir = os.path.dirname(os.path.realpath(launcher))
+            candidates[:0] = [os.path.join(bindir, "python3"), os.path.join(bindir, "python")]
+        for python in candidates:
+            if os.access(python, os.X_OK) and \
+                    run([python, "-I", "-c", "import meshcore"], timeout=30).returncode == 0:
+                self._meshcore_python = python
+                return python
+        raise PhaseError("no python that can import the meshcore library — it is installed "
+                         "with meshcore-cli, and none was found beside the meshcore-cli launcher")
+
+    def peer_session(self, steps: list, listen_s: float) -> dict:
+        """Runs `steps` on the peer and returns what its radio heard meanwhile."""
+        if len(self.peer.transport) != 2:
+            raise PhaseError("the peer has no BLE address to connect to; preflight finds one")
+        spec = json.dumps({"address": self.peer.transport[1], "steps": steps,
+                           "listen": listen_s})
+        budget = T_CLI_BLE + listen_s + sum(s[1] for s in steps if s[0] == "sleep") \
+            + 5 * len(steps)
+        python, last = self.meshcore_python(), None
+        for attempt in range(2):
+            if self.a.verbose:
+                print(paint(f"    peer session: {steps}", "90"), flush=True)
+            last = run([python, "-I", "-c", PEER_SESSION, spec], timeout=int(budget))
+            docs = json_docs(last.stdout)
+            if last.returncode == 0 and docs:
+                out = docs[-1]
+                refused = [st for st in out.get("steps", []) if not st.get("ok")]
+                if refused:
+                    raise PhaseError(f"the peer refused: {refused}")
+                return out
+            time.sleep(2)
+        lines = [l.strip() for l in (last.stderr or "").splitlines() if l.strip()]
+        raise PhaseError("peer session produced no result"
+                         + (f" ({' / '.join(lines[-3:])[:300]})" if lines else ""))
+
+    def relay_probe(self) -> dict:
+        """Five packets a relay must each treat its own way, sent by the peer.
+
+        The same five every time, so that relay off and relay on differ only in
+        what came back: a flood advert (repeat it), a direct packet routed
+        through us (forward it), one routed past us (leave it), and a trace
+        through us with one- and two-byte hashes (forward it, adding our SNR).
+        Each is told apart by its contents, never by when it was heard.
+        """
+        us, peer = self.uconsole_key[:2], self.peer_key[:2]
+        through, past = secrets.token_hex(8), secrets.token_hex(8)
+        tag, wide_tag = secrets.randbelow(0xFFFFFFFE) + 1, secrets.randbelow(0xFFFFFFFE) + 1
+        out = self.peer_session([
+            ["advert"], ["sleep", RELAY_GAP_S],
+            ["raw", us + peer, through], ["sleep", RELAY_GAP_S],
+            ["raw", peer + us, past], ["sleep", RELAY_GAP_S],
+            ["trace", us, 0, tag], ["sleep", RELAY_GAP_S],
+            ["trace", self.uconsole_key[:4], 1, wide_tag],
+        ], listen_s=RELAY_LISTEN_S)
+        frames = [f for f in (Frame.parse(h) for h in out.get("heard", [])) if f]
+        traces = out.get("traces", [])
+        return {
+            "advert": [f for f in frames if f.kind == PAYLOAD_ADVERT and f.hops == [us]
+                       and f.payload.startswith(self.peer_key.lower())],
+            "through": [f for f in frames
+                        if f.kind == PAYLOAD_RAW_CUSTOM and f.payload == through],
+            "past": [f for f in frames if f.kind == PAYLOAD_RAW_CUSTOM and f.payload == past],
+            "trace": [t for t in traces if t.get("tag") == tag],
+            "wide": [t for t in traces if t.get("tag") == wide_tag],
+            "heard": len(frames),
+        }
 
     def ensure_peer_knows_us(self) -> dict:
         """The peer cannot decrypt for a key it has never heard of.
@@ -572,37 +789,7 @@ class Harness:
             # eventually stops it hearing us at all.
             self.ssh.check(f"rm -f {self.state}/contacts {self.state}/channels")
 
-        ini = "\n".join([
-            "# Written by tools/hw_e2e_test.py. Edits here are overwritten.",
-            "[radio]",
-            f"lora_freq = {self.a.freq}",
-            f"lora_bw = {self.a.bw}",
-            f"lora_sf = {self.a.sf}",
-            f"lora_cr = {self.a.cr}",
-            f"lora_tx_power = {self.a.tx_power}",
-            "[hardware]",
-            f"spidev = {self.a.spidev}",
-            f"lora_gpiochip = {self.a.gpiochip}",
-            f"lora_irq_pin = {self.a.irq_pin}",
-            f"lora_busy_pin = {self.a.busy_pin}",
-            f"lora_reset_pin = {self.a.reset_pin}",
-            "[storage]",
-            f"state_dir = {self.home}/{self.a.remote_dir}/state",
-            "[node]",
-            f"advert_name = {self.a.node_name}",
-            # Adverts on demand only: every assertion below is about a packet
-            # this script asked for.
-            "advert_interval = 0",
-            "[companion]",
-            "companion_interface = tcp",
-            "companion_bind = 127.0.0.1",
-            f"companion_port = {self.a.remote_port}",
-            "[logging]",
-            "log_level = debug",
-            "",
-        ])
-        # Quoted heredoc: the file is written exactly as composed here.
-        self.ssh.check(f"cat > {self.ini} <<'CORELETD_INI'\n{ini}CORELETD_INI")
+        self.write_config(repeat=False)
         c("daemon", "config written", True, self.ini)
 
         self.start_daemon(fresh_log=True)
@@ -688,7 +875,7 @@ class Harness:
               found.get("adv_name") == self.a.node_name, f"{found.get('adv_name')!r}")
 
     def phase_advert_rx(self) -> None:
-        self.banner("advert_rx", "the peer's advert reaches us and teaches a route")
+        self.banner("advert_rx", "the peer's advert reaches us, and no route with it")
         c = self.report.check
 
         self.peer.cli("floodadv")
@@ -699,11 +886,12 @@ class Harness:
         if not found:
             return
 
-        # A flood advert carries the path it travelled; reversed, that is the
-        # route back. Straight off the peer's antenna it is empty, which is a
-        # known zero-hop route and not the same as knowing nothing.
-        c("advert_rx", "the advert taught us a return path",
-          found.get("out_path_len", -1) >= 0,
+        # Routes come only from returned paths, never from adverts: that is
+        # MeshCore's rule and the daemon's. A flood advert's path reversed is a
+        # guess about links nobody has used, so the contact must hold no route
+        # yet, however the advert arrived.
+        c("advert_rx", "the advert did not invent a route",
+          found.get("out_path_len", -1) < 0,
           f"out_path_len={found.get('out_path_len')} path={found.get('out_path')!r}")
 
         # StateWriter coalesces for a second before it replaces the file, so
@@ -719,18 +907,14 @@ class Harness:
         c("advert_rx", "the contact reached the state directory",
           "No such file" not in on_disk, on_disk[-70:])
 
-    def phase_message_rx(self) -> None:
-        self.banner("message_rx", "peer → coreletd, decrypted, stored and acked")
-        c = self.report.check
-        self.ensure_peer_knows_us()
-        self.ensure_peer_contact()
-        body = self.tag("rx")
+    def receive_from_peer(self, how: str) -> dict | None:
+        """The peer sends us a message; checks it was acked, stored and attributed.
 
-        # Read the peer's route to us before the exchange, not after: our reply
-        # to a flood-routed message teaches it one, so asking afterwards would
-        # be asking about a route that did not exist when the message was sent.
-        before = self.peer.find_contact(self.uconsole_key[:12]) or {}
-        knew_route = before.get("out_path_len", -1) >= 0
+        `how` names the routing the message is expected to take, and labels the
+        checks. Returns the message as our inbox gave it.
+        """
+        c = self.report.check
+        body = self.tag(f"rx {how}")
 
         # The peer waits for the ack itself. coreletd only acks a message it
         # decrypted and stored, so an ack here already proves the receive path
@@ -739,7 +923,7 @@ class Harness:
                              timeout=T_CLI_BLE + T_MESSAGE)
         sent = next((d for d in docs if "expected_ack" in d), {})
         expected = sent.get("expected_ack", "")
-        c("message_rx", "peer accepted the message for sending", bool(expected),
+        c("message_rx", f"peer accepted the {how} message for sending", bool(expected),
           f"expected ack {expected}, suggested timeout {sent.get('suggested_timeout')} ms")
 
         ack = next((d for d in docs if "code" in d), {})
@@ -753,11 +937,11 @@ class Harness:
             acked = bool(line)
             detail = ("we sent it, the peer did not hear it back in time: " + line[-60:]
                       if line else "no ack, and none in our log either")
-        c("message_rx", "coreletd acked it", acked, detail)
+        c("message_rx", f"coreletd acked the {how} message", acked, detail)
 
         inbox = self.drain_inbox(self.uconsole, body, T_MESSAGE)
         got = next((m for m in inbox if body in (m.get("text") or "")), None)
-        c("message_rx", "the message is in our inbox with the right text", got is not None,
+        c("message_rx", f"the {how} message is in our inbox with the right text", got is not None,
           f"{(got or {}).get('text')!r}" if got
           else f"{len(inbox)} message(s) read, none matching")
         if got:
@@ -765,33 +949,56 @@ class Harness:
               (got.get("pubkey_prefix") or "").lower().startswith(self.peer_key[:12].lower()),
               f"from {got.get('pubkey_prefix')} SNR {got.get('SNR')} dB "
               f"path_len {got.get('path_len')}")
+        return got
 
-            # The field is MeshCore's way round: 255 means the message came
-            # direct, anything else is the path_length byte a flood-routed one
-            # arrived with. Which of the two the peer sent is not ours to
-            # choose, so ask the peer: it routes direct exactly when it holds an
-            # out_path for us, and floods otherwise.
+    def phase_message_rx(self) -> None:
+        self.banner("message_rx", "peer → coreletd, flooded then direct, each acked")
+        c = self.report.check
+        self.ensure_peer_knows_us()
+        self.ensure_peer_contact()
+
+        before = self.forget_routes()
+        c("message_rx", "the peer starts with no route to us", before.get("out_path_len", 0) < 0,
+          f"out_path_len={before.get('out_path_len')}")
+
+        # path_len is MeshCore's way round: 255 means the message came direct,
+        # anything else is the path_length byte a flood-routed one arrived with.
+        got = self.receive_from_peer("flooded")
+        if got:
             plen = got.get("path_len")
-            c("message_rx", "path_len says how the message was routed",
-              plen == 255 if knew_route else isinstance(plen, int) and 0 <= plen <= 63,
-              f"path_len {plen}, and the peer held "
-              f"{'a route' if knew_route else 'no route'} to us when it sent "
-              f"(out_path_len={before.get('out_path_len')})")
+            c("message_rx", "it arrived flood-routed", isinstance(plen, int) and 0 <= plen <= 63,
+              f"path_len {plen}")
 
-            # A flood-routed message means the sender has no way back, and
-            # MeshCore learns one only from a returned path — not from adverts.
-            # Our reply carries it, so the peer that had none now holds one and
-            # stops flooding at us.
-            if not knew_route:
-                learned, end = {}, time.time() + T_MESSAGE
-                while time.time() < end:
-                    learned = self.peer.find_contact(self.uconsole_key[:12]) or {}
-                    if learned.get("out_path_len", -1) >= 0:
-                        break
-                c("message_rx", "our reply taught the peer a route back to us",
-                  learned.get("out_path_len", -1) >= 0,
-                  f"out_path_len={learned.get('out_path_len')} "
-                  f"path={learned.get('out_path')!r}")
+        # MeshCore learns a route only from a returned path. Our reply to a
+        # flood-routed message is one, flooded — we hold no route to the peer
+        # either — so the peer that had none now holds one.
+        learned, end = {}, time.time() + T_MESSAGE
+        while time.time() < end:
+            learned = self.peer.find_contact(self.uconsole_key[:12]) or {}
+            if learned.get("out_path_len", -1) >= 0:
+                break
+        c("message_rx", "our reply taught the peer a route back to us",
+          learned.get("out_path_len", -1) >= 0,
+          f"out_path_len={learned.get('out_path_len')} path={learned.get('out_path')!r}")
+
+        # And MeshCore answers a flood-routed PATH with a reciprocal one,
+        # direct. That is where our route to the peer comes from.
+        ours, end = {}, time.time() + T_MESSAGE
+        while time.time() < end:
+            ours = self.uconsole.find_contact(self.peer_key[:12]) or {}
+            if ours.get("out_path_len", -1) >= 0:
+                break
+            time.sleep(1)
+        c("message_rx", "the peer's reciprocal path taught us a route to it",
+          ours.get("out_path_len", -1) >= 0,
+          f"out_path_len={ours.get('out_path_len')} path={ours.get('out_path')!r}")
+
+        # With routes both ways, the next message comes direct and our ack goes
+        # back direct: the other half of the receive path.
+        got = self.receive_from_peer("direct")
+        if got:
+            c("message_rx", "it arrived direct, down the route we returned",
+              got.get("path_len") == 255, f"path_len {got.get('path_len')}")
 
     def phase_message_tx(self) -> None:
         self.banner("message_tx", "coreletd → peer, retried until acknowledged")
@@ -847,19 +1054,85 @@ class Harness:
         acked, detail = self.await_ack(sent.get("expected_ack", ""), docs, T_ACK_LADDER)
         c("path", "and is still acknowledged", acked, detail)
 
-        # Acks do not carry a route; only a flood advert does, which is exactly
-        # what the daemon sends when the app asks to rediscover a path.
-        self.peer.cli("floodadv")
-        deadline = time.time() + T_ADVERT
+        # The peer answers a flood-routed message with a returned path — the
+        # ack rides inside it — and a returned path is the only thing a route
+        # ever comes from. So the ack exchange itself is what restores it.
+        deadline = time.time() + T_MESSAGE
         relearned = {}
         while time.time() < deadline:
             relearned = self.uconsole.find_contact(self.peer_key[:12]) or {}
             if relearned.get("out_path_len", -1) >= 0:
                 break
-            time.sleep(2)
-        c("path", "the next flood advert restores the route",
+            time.sleep(1)
+        c("path", "the peer's returned path restores the route",
           relearned.get("out_path_len", -1) >= 0,
           f"out_path_len={relearned.get('out_path_len')}")
+
+    def phase_relay(self) -> None:
+        self.banner("relay", "with repeat on, coreletd relays what MeshCore relays")
+        c = self.report.check
+        self.ensure_peer_knows_us()
+        self.ensure_peer_contact()
+        us, peer = self.uconsole_key[:2], self.peer_key[:2]
+
+        # A relay needs a third node, and there are two radios. What makes two
+        # enough is that MeshCore hands the app every frame its radio hears,
+        # before deduplicating: the peer hears its own packets come back when
+        # we relay them, with the path showing what we did to them.
+        off = self.relay_probe()
+        leaked = [f.describe() for f in off["advert"] + off["through"] + off["past"]]
+        leaked += [f"trace {t.get('tag')} came back" for t in off["trace"] + off["wide"]]
+        c("relay", "with repeat off, none of the five is relayed", not leaked,
+          "; ".join(leaked) or f"the peer heard {off['heard']} frame(s), none of them a relay "
+                               f"of its own")
+
+        try:
+            c("relay", "coreletd restarted with repeat on", self.restart_daemon(repeat=True))
+            on = self.relay_probe()
+
+            c("relay", "the peer's flood advert is repeated with our hash appended",
+              bool(on["advert"]), on["advert"][0].describe() if on["advert"]
+              else f"none of the {on['heard']} frame(s) the peer heard was its advert via [{us}]")
+
+            ok = any(not f.flood and f.hops == [peer] for f in on["through"])
+            c("relay", "a direct packet routed through us is forwarded, our hop popped", ok,
+              "; ".join(f.describe() for f in on["through"]) or "the peer never heard it again")
+            c("relay", "one whose next hop is not us is left alone", not on["past"],
+              "; ".join(f.describe() for f in on["past"]) or "not heard again")
+
+            for key, what, width in (("trace", "a trace through us", 1),
+                                     ("wide", "a trace with two-byte hashes", 2)):
+                got = on[key]
+                hops = (got[0].get("path") or []) if got else []
+                first = hops[0] if hops else {}
+                c("relay", f"{what} comes back with our SNR reading",
+                  first.get("hash") == self.uconsole_key[:2 * width] and "snr" in first,
+                  f"via {first.get('hash')}, which heard it at {first.get('snr')} dB; back at "
+                  f"the peer at {hops[-1].get('snr')} dB" if hops else "no trace came back")
+
+            # MeshCore floods a packet onward only when it was not for it, and
+            # a message for us is answered with a path instead.
+            body = self.tag("relay")
+            out = self.peer_session([["reset_path", self.uconsole_key],
+                                     ["msg", self.uconsole_key, body]], RELAY_LISTEN_S)
+            frames = [f for f in (Frame.parse(h) for h in out.get("heard", [])) if f]
+            repeated = [f for f in frames if f.kind == PAYLOAD_TXT_MSG and us in f.hops
+                        and f.payload.startswith(us + peer)]
+            answer = [f for f in frames if f.kind == PAYLOAD_PATH and f.flood
+                      and f.payload.startswith(peer + us)]
+            c("relay", "a message for us is answered with our path, not repeated",
+              bool(answer) and not repeated,
+              "repeated: " + "; ".join(f.describe() for f in repeated) if repeated
+              else (f"answered with {answer[0].describe()}" if answer
+                    else "no answer heard either"))
+            inbox = self.drain_inbox(self.uconsole, body, T_MESSAGE)
+            c("relay", "and delivered", any(body in (m.get("text") or "") for m in inbox),
+              f"{len(inbox)} message(s) read")
+        finally:
+            # A relay left up repeats every stranger's flood in range and ends
+            # up on the routes their peers build, so it goes back off even when
+            # a check above blew up.
+            self.restart_daemon(repeat=False)
 
     def phase_channel(self) -> None:
         self.banner("channel", "a group message on a private channel")
@@ -902,8 +1175,9 @@ class Harness:
         c("restart", "contacts were flushed on shutdown",
           contacts_file.isdigit() and int(contacts_file) > 0, f"{contacts_file} bytes on disk")
 
+        before_start = self.radio_up_count()
         self.start_daemon(fresh_log=False)
-        self.await_radio(T_RADIO_READY)
+        self.await_radio(T_RADIO_READY, after=before_start)
         info = self.uconsole.one("infos", attempts=3)
         c("restart", "the node kept its identity", info.get("public_key") == self.uconsole_key,
           info.get("public_key", "")[:12])
@@ -922,6 +1196,49 @@ class Harness:
               f"slot {self.a.channel_slot}: {chan.get('channel_name')!r}")
 
     # -- daemon lifecycle -------------------------------------------------
+
+    def write_config(self, repeat: bool) -> None:
+        ini = "\n".join([
+            "# Written by tools/hw_e2e_test.py. Edits here are overwritten.",
+            "[radio]",
+            f"lora_freq = {self.a.freq}",
+            f"lora_bw = {self.a.bw}",
+            f"lora_sf = {self.a.sf}",
+            f"lora_cr = {self.a.cr}",
+            f"lora_tx_power = {self.a.tx_power}",
+            "[hardware]",
+            f"spidev = {self.a.spidev}",
+            f"lora_gpiochip = {self.a.gpiochip}",
+            f"lora_irq_pin = {self.a.irq_pin}",
+            f"lora_busy_pin = {self.a.busy_pin}",
+            f"lora_reset_pin = {self.a.reset_pin}",
+            "[storage]",
+            f"state_dir = {self.home}/{self.a.remote_dir}/state",
+            "[node]",
+            f"advert_name = {self.a.node_name}",
+            # Adverts on demand only: every assertion below is about a packet
+            # this script asked for.
+            "advert_interval = 0",
+            # Off except in the relay phase, which turns it on for itself.
+            f"repeat = {1 if repeat else 0}",
+            "[companion]",
+            "companion_interface = tcp",
+            "companion_bind = 127.0.0.1",
+            f"companion_port = {self.a.remote_port}",
+            "[logging]",
+            "log_level = debug",
+            "",
+        ])
+        # Quoted heredoc: the file is written exactly as composed here.
+        self.ssh.check(f"cat > {self.ini} <<'CORELETD_INI'\n{ini}CORELETD_INI")
+
+    def restart_daemon(self, repeat: bool) -> bool:
+        """Restarts coreletd on a rewritten config; True once its radio is back."""
+        self.stop_daemon()
+        self.write_config(repeat)
+        before = self.radio_up_count()
+        self.start_daemon(fresh_log=False)
+        return self.await_radio(T_RADIO_READY, after=before)
 
     # The daemon is identified by the absolute config path on its command line.
     # The leading character is bracketed so the pattern never matches the shell
@@ -1019,18 +1336,22 @@ class Harness:
                           f"so the retry ladder is what delivered it")
         return False, f"no ack for {expected} in {deadline_s}s, over the whole retry ladder"
 
-    def await_radio(self, deadline_s: int) -> bool:
+    def radio_up_count(self) -> int:
+        out = self.ssh.run(f"grep -c 'sx1262: SX1262 on' {self.log} 2>/dev/null || true")
+        return int(out.stdout.strip()) if out.stdout.strip().isdigit() else 0
+
+    def await_radio(self, deadline_s: int, after: int = 0) -> bool:
         """Waits for the SX1262 to report itself up in the daemon's log.
 
         The companion protocol has no "is the radio there" question, and the
         driver retries a rail that is powered up late, so the log is the only
         place this is visible — and a much better diagnostic than a silent
-        advert phase later on.
+        advert phase later on. A restart appends to the log, so it passes how
+        many starts were there already and waits for one more.
         """
         end = time.time() + deadline_s
         while time.time() < end:
-            out = self.ssh.run(f"grep -c 'sx1262: SX1262 on' {self.log} 2>/dev/null || true")
-            if out.stdout.strip().isdigit() and int(out.stdout.strip()) > 0:
+            if self.radio_up_count() > after:
                 return True
             time.sleep(3)
         return False
@@ -1109,10 +1430,11 @@ PHASES = [
     ("daemon", "configure, start and connect to coreletd", True),
     ("companion", "the protocol surface the phone app uses", True),
     ("advert_tx", "our advert goes out and the peer believes it", True),
-    ("advert_rx", "the peer's advert reaches us and teaches a route", True),
-    ("message_rx", "peer → coreletd, decrypted, stored and acked", True),
+    ("advert_rx", "the peer's advert reaches us, and no route with it", True),
+    ("message_rx", "peer → coreletd, flooded then direct, each acked", True),
     ("message_tx", "coreletd → peer, retried until acknowledged", True),
     ("path", "a reset route falls back to flood and is relearned", True),
+    ("relay", "with repeat on, coreletd relays what MeshCore relays", False),
     ("channel", "a group message on a private channel", False),
     ("restart", "state survives a stop and start", True),
 ]
@@ -1166,6 +1488,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                           "on the peer (slot %d by default) and clears it afterwards"
                           % DEFAULTS["channel_slot"])
     sel.add_argument("--channel-slot", type=int, default=DEFAULTS["channel_slot"])
+    sel.add_argument("--with-relay", action="store_true",
+                     help="also run the relay phase, which turns repeat on for its duration: "
+                          "coreletd then relays every stranger's flood in range too")
     sel.add_argument("--with-unit-tests", action="store_true",
                      help="also run ctest on the target during deploy")
 
@@ -1187,6 +1512,8 @@ def selected_phases(args) -> list[str]:
     wanted = {n for n, _, on in PHASES if on}
     if args.with_channel:
         wanted.add("channel")
+    if args.with_relay:
+        wanted.add("relay")
 
     if args.only:
         unknown = set(args.only) - set(order)

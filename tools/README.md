@@ -49,16 +49,18 @@ tools/hw_e2e_test.py --skip deploy        # reuse the build already on the targe
 tools/hw_e2e_test.py --only message_tx    # one phase; prerequisites still run
 tools/hw_e2e_test.py --list               # what the phases are
 tools/hw_e2e_test.py --keep-running       # leave the daemon and tunnel up to poke at
+tools/hw_e2e_test.py --with-relay         # also relay through coreletd (see below)
 ```
 
 The phases build on each other: `preflight` (tools, ssh, LoRa rail, peer on the same air
 settings) → `deploy` (rsync + cmake, and `--with-unit-tests` for ctest on the target) → `daemon`
 (generated `.ini`, start, wait for the SX1262, connect through the tunnel) → `companion` (the
-protocol surface) → `advert_tx` / `advert_rx` (a signed advert each way, and the return path a
-flood advert teaches) → `message_rx` / `message_tx` (an encrypted direct message each way, each
-confirmed by the *other* node's ack) → `path` (a reset route falls back to flood and is relearned)
-→ `channel` (a group message on a private channel, opt-in) → `restart` (state survives a stop and
-start).
+protocol surface) → `advert_tx` / `advert_rx` (a signed advert each way, and no route taken
+from the one we receive) → `message_rx` / `message_tx` (an encrypted direct message each way, each
+confirmed by the *other* node's ack; the peer's is sent once flooded and once direct, with the
+`PATH` exchange between them that gives each node its route to the other) → `path` (a reset route
+falls back to flood and is relearned from the reply) → `relay` (opt-in, below) → `channel` (a
+group message on a private channel, opt-in) → `restart` (state survives a stop and start).
 
 Each phase establishes what it needs rather than assuming an earlier one ran, so `--only` works on
 any of them. That matters more than it sounds: contacts and channels are wiped at the start of
@@ -79,8 +81,31 @@ rail — describe the hardware rather than any particular unit, and every one is
 - **The air settings must match the peer exactly.** A mismatch is silence, not an error, so
   `preflight` reads them off the peer and compares.
 - **The peer's own state is left alone.** Its message queue is never drained: delivery to it is
-  asserted from the ack *it* sends, which it only sends after decrypting. The single exception is
-  `--with-channel`, which writes one spare channel slot and clears it again on the way out.
+  asserted from the ack *it* sends, which it only sends after decrypting. Two exceptions: its route
+  to the test node is forgotten before the peer sends to us, because a kept identity means the peer
+  would otherwise go on using the route from the first run ever and the flood exchange would never
+  be tested again — the exchange then teaches it the route back; and `--with-channel` writes one
+  spare channel slot and clears it again on the way out.
+
+### Relaying
+
+A relay needs a third node, and the bench has two radios. What makes two enough is that MeshCore
+hands its app every frame the radio hears, before it deduplicates, so the peer hears its own packets
+come back when coreletd relays them, with the path showing what was done to them. Reading that
+needs the raw receive log and a direct packet sent down a path of the script's choosing, neither of
+which meshcore-cli has a command for; the `relay` phase gets both from the `meshcore` library that
+meshcore-cli is built on, run in meshcore-cli's own interpreter.
+
+The phase has the peer send the same five packets with repeat off and then on: a flood advert, a
+raw packet routed through coreletd, one routed past it, and a trace through it with one- and
+two-byte hashes. With repeat off nothing may come back; with it on the advert must come back with
+our hash appended, the routed packet with our hop popped, the traces with our SNR reading, and the
+packet routed past us not at all. A message for us must then be answered with our `PATH` and not
+repeated.
+
+It is opt-in (`--with-relay`) because for its minute or so coreletd relays every stranger's flood
+in range, and puts itself on the routes their peers build. It turns repeat off again before it
+returns, failed or not.
 
 The daemon log is fetched to `dist/e2e-logs/` after each run, and a run that dies half way still
 stops the daemon it started — a leftover one holds the SPI bus and the GPIO lines, so the next run

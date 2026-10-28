@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <fstream>
+#include <optional>
 
 #include "crypto/crypto.h"
 #include "mesh/channels.h"
@@ -837,11 +838,9 @@ static void test_received_message_marks_store_dirty() {
     Node node(loop, dispatcher, *self, contacts, channels, Node::Config {});
     node.start();
 
-    // The reference packet is a zero-hop flood, so give the contact that exact
-    // route up front: the return path is then unchanged and last_seen is the
-    // only reason the store can come out dirty.
-    contacts.set_path(peer, {});
-
+    // Nothing about the route changes on receipt — routes come only from
+    // returned paths — so last_seen is the only reason the store can come out
+    // dirty.
     CHECK(contacts.save());
     CHECK(!contacts.dirty());
     std::remove(path.c_str());
@@ -1016,9 +1015,12 @@ static void test_flood_message_is_answered_with_a_path_return() {
     if (!sent) return;
     CHECK(sent->type == proto::PayloadType::Path);
 
-    // It goes out along the route we just learned, which is that path reversed.
-    CHECK(sent->is_direct());
-    CHECK_BYTES(sent->path, (Bytes {0x22, 0x11}));
+    // Flooded, as MeshCore floods it: we hold no route to the sender, and the
+    // path its packet took, reversed, is a guess about links nobody has used.
+    // It is not installed as a route either.
+    CHECK(sent->is_flood());
+    CHECK(sent->path.empty());
+    CHECK(!peer.path_known);
 
     auto env = proto::DirectEnvelope::decode(sent->payload);
     CHECK(env.has_value());
@@ -1125,6 +1127,617 @@ static void test_flood_path_return_is_reciprocated() {
     // replying to every reply is how two nodes talk to each other for ever.
     send_path(proto::RouteType::Direct);
     CHECK_EQ(radio.send_count(), size_t {1});
+}
+
+// ---------------------------------------------------------------------------
+// MeshCore's receive rules, one by one, against Mesh::onRecvPacket and
+// BaseChatMesh. One node on virtual time, with A on the far side of the air.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct AckSpy : Node::Delegate {
+    int acks = 0;
+    void on_ack(ByteView) override { acks++; }
+};
+
+struct Bench {
+    std::optional<crypto::LocalIdentity> self;  // B, the node under test
+    std::optional<crypto::LocalIdentity> peer;  // A, on the far side
+    ContactStore contacts;
+    ChannelStore channels;
+    ManualClock clock;
+    EventLoop loop;
+    GatedRadio radio;
+    Dispatcher dispatcher;
+    Node node;
+    AckSpy spy;
+    Contact* a = nullptr;
+    Bytes shared;
+
+    explicit Bench(Node::Config cfg = {})
+        : self(crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivB))),
+          peer(crypto::LocalIdentity::from_bytes(from_hex(pv::kPrivA))),
+          contacts(*self),
+          loop(clock),
+          dispatcher(loop, radio),
+          node(loop, dispatcher, *self, contacts, channels, std::move(cfg)) {
+        a = contacts.upsert(from_hex(pv::kPubA));
+        std::string error;
+        dispatcher.start(error);
+        radio.set_ready(true);
+        node.set_delegate(&spy);
+        node.start();
+        shared = a->shared_secret(*self);
+    }
+
+    uint8_t us() const { return self->pub()[0]; }
+
+    // A text from A to us, sealed as A would seal it.
+    Bytes text_from_a(uint8_t txt_type, uint32_t timestamp, Bytes text) {
+        proto::TextMessage msg;
+        msg.timestamp = timestamp;
+        msg.txt_type = txt_type;
+        msg.text = std::move(text);
+        return proto::DirectEnvelope::seal(us(), peer->pub()[0], shared, msg.encode()).encode();
+    }
+
+    void inject(proto::PayloadType type, proto::RouteType route, Bytes path, Bytes payload,
+                uint8_t hash_size = 1) {
+        proto::Packet p;
+        p.type = type;
+        p.route = route;
+        p.path = std::move(path);
+        p.path_hash_size = hash_size;
+        p.payload = std::move(payload);
+        radio.inject(p.encode());
+    }
+
+    std::optional<proto::Packet> last_sent() { return proto::Packet::decode(radio.last_sent()); }
+
+    // Lets a relay's stagger and any transmission already on the air run out,
+    // so that send_count() afterwards is everything a packet caused.
+    void settle() {
+        for (int i = 0; i < 4; i++) {
+            loop.advance(1200);
+            radio.complete_tx();
+        }
+    }
+
+    std::optional<proto::PathReturn> open_path_return(const proto::Packet& p) {
+        auto env = proto::DirectEnvelope::decode(p.payload);
+        if (!env) return std::nullopt;
+        auto plain = crypto::mac_and_decrypt(shared, env->mac, env->ciphertext);
+        if (!plain) return std::nullopt;
+        return proto::PathReturn::decode(*plain);
+    }
+};
+
+}  // namespace
+
+// Routes come only from returned paths. A flood advert's path reversed is a
+// guess about links nobody has used, and MeshCore does not take it; nor a
+// flood message's. A wrong guess would sit over the route the peer told us.
+static void test_flood_paths_are_not_turned_into_routes() {
+    Bench b;
+    b.contacts.set_path(*b.a, Bytes {0x33});  // what the peer told us
+
+    auto advert = proto::Packet::decode(from_hex(pv::kAdvertPacket));
+    CHECK(advert.has_value());
+    if (!advert) return;
+    b.inject(proto::PayloadType::Advert, proto::RouteType::Flood, {0x11, 0x22}, advert->payload);
+    CHECK_EQ(b.a->adv_timestamp, pv::kFixedTime);
+    CHECK_BYTES(b.a->out_path, (Bytes {0x33}));
+
+    b.inject(proto::PayloadType::TxtMsg, proto::RouteType::Flood, {0x11, 0x22},
+             b.text_from_a(proto::kTxtPlain, 1700000000, from_str("hello")));
+    CHECK(b.node.has_messages());
+    CHECK(b.a->path_known);
+    CHECK_BYTES(b.a->out_path, (Bytes {0x33}));
+}
+
+// A flood-routed ack from a contact we hold a route for means it holds none for
+// us: our path return never reached it, or has not yet. MeshCore offers the
+// route again, direct, three seconds later (handleReturnPathRetry); a peer that
+// never hears one floods at us for good.
+static void test_flood_ack_from_a_routed_contact_is_offered_the_route_again() {
+    Bench b;
+    b.contacts.set_path(*b.a, Bytes {0x33});
+
+    auto ack = b.node.send_text(*b.a, "hello", proto::kTxtPlain, pv::kFixedTime);
+    CHECK(ack.has_value());
+    if (!ack) return;
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+    b.radio.complete_tx();
+
+    // A heard it, but has no route to us, so its ack comes back flooded.
+    Bytes payload = *ack;
+    payload.push_back(0x00);
+    payload.push_back(0x5A);
+    b.inject(proto::PayloadType::Ack, proto::RouteType::Flood, {0x44}, payload);
+    CHECK_EQ(b.spy.acks, 1);
+
+    // Nothing for three seconds, then the route, direct along the one we hold.
+    b.loop.advance(2999);
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+    b.loop.advance(1);
+    CHECK_EQ(b.radio.send_count(), size_t {2});
+    auto sent = b.last_sent();
+    CHECK(sent.has_value());
+    if (!sent) return;
+    CHECK(sent->type == proto::PayloadType::Path);
+    CHECK(sent->is_direct());
+    CHECK_BYTES(sent->path, (Bytes {0x33}));
+    auto ret = b.open_path_return(*sent);
+    CHECK(ret.has_value());
+    // The ack's inbound path, unreversed, is the peer's route to us.
+    if (ret) CHECK_BYTES(ret->path, (Bytes {0x44}));
+    b.radio.complete_tx();
+
+    // A direct-routed ack says the peer has a route: nothing to remind it of.
+    ack = b.node.send_text(*b.a, "hello again", proto::kTxtPlain, pv::kFixedTime + 1);
+    CHECK(ack.has_value());
+    if (!ack) return;
+    CHECK_EQ(b.radio.send_count(), size_t {3});
+    b.radio.complete_tx();
+    payload = *ack;
+    payload.push_back(0x00);
+    payload.push_back(0x5B);
+    b.inject(proto::PayloadType::Ack, proto::RouteType::Direct, {}, payload);
+    CHECK_EQ(b.spy.acks, 2);
+    b.loop.advance(3000);
+    CHECK_EQ(b.radio.send_count(), size_t {3});
+}
+
+// A direct-routed packet with hops left on its path is in transit, not for us.
+// MeshCore does not decrypt one; what it does read out of one is an ack, early.
+static void test_in_transit_direct_packets_are_not_opened() {
+    Bench b;
+
+    // Addressed to us, but the path says it has a hop to go. Opening it would
+    // ack a message the sender is still expecting to travel.
+    b.inject(proto::PayloadType::TxtMsg, proto::RouteType::Direct, {0x55},
+             b.text_from_a(proto::kTxtPlain, 1700000000, from_str("not yet")));
+    CHECK(!b.node.has_messages());
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {0});  // no ack, and nothing relayed
+
+    // With its path consumed, the same kind of text is ours.
+    b.inject(proto::PayloadType::TxtMsg, proto::RouteType::Direct, {},
+             b.text_from_a(proto::kTxtPlain, 1700000001, from_str("now")));
+    CHECK(b.node.has_messages());
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+    b.radio.complete_tx();
+
+    // An ack passing through is read on the way past.
+    b.contacts.set_path(*b.a, Bytes {0x33});
+    auto ack = b.node.send_text(*b.a, "hello", proto::kTxtPlain, pv::kFixedTime);
+    CHECK(ack.has_value());
+    if (!ack) return;
+    b.radio.complete_tx();
+    Bytes payload = *ack;
+    payload.push_back(0x00);
+    payload.push_back(0x5A);
+    b.inject(proto::PayloadType::Ack, proto::RouteType::Direct, {0x55}, payload);
+    CHECK_EQ(b.spy.acks, 1);
+}
+
+// With relaying on, a direct-routed packet whose next hop is us goes on down
+// the rest of its path with our hop consumed — the half of relaying that
+// repeating floods makes necessary, since peers build routes through a node
+// they saw in a flood path.
+static void test_relay_forwards_direct_packets_through_us() {
+    Node::Config cfg;
+    cfg.repeat = true;
+    Bench b(cfg);
+    const uint8_t us = b.us();
+
+    const Bytes through = b.text_from_a(proto::kTxtPlain, 1700000000, from_str("through"));
+    b.inject(proto::PayloadType::TxtMsg, proto::RouteType::Direct, {us, 0x66}, through);
+    CHECK(!b.node.has_messages());
+    // Spread over up to one packet's airtime, as MeshCore's companion does.
+    b.loop.advance(1000);
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+    auto sent = b.last_sent();
+    CHECK(sent.has_value());
+    if (sent) {
+        CHECK(sent->is_direct());
+        CHECK_BYTES(sent->path, (Bytes {0x66}));
+        CHECK_BYTES(sent->payload, through);
+    }
+    b.radio.complete_tx();
+
+    // Somebody else's hop is not ours to send.
+    b.inject(proto::PayloadType::TxtMsg, proto::RouteType::Direct, {0x77, us},
+             b.text_from_a(proto::kTxtPlain, 1700000001, from_str("elsewhere")));
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+
+    // An ack passing through that answers our own send is consumed, not
+    // forwarded: MeshCore marks it do-not-retransmit.
+    b.contacts.set_path(*b.a, Bytes {0x33});
+    auto ack = b.node.send_text(*b.a, "hello", proto::kTxtPlain, pv::kFixedTime);
+    CHECK(ack.has_value());
+    if (!ack) return;
+    CHECK_EQ(b.radio.send_count(), size_t {2});
+    b.radio.complete_tx();
+    Bytes payload = *ack;
+    payload.push_back(0x00);
+    payload.push_back(0x5A);
+    b.inject(proto::PayloadType::Ack, proto::RouteType::Direct, {us, 0x66}, payload);
+    CHECK_EQ(b.spy.acks, 1);
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {2});
+
+    // One for somebody else goes on, straight away.
+    b.inject(proto::PayloadType::Ack, proto::RouteType::Direct, {us, 0x66}, {9, 8, 7, 6, 5, 4});
+    CHECK_EQ(b.radio.send_count(), size_t {3});
+    sent = b.last_sent();
+    CHECK(sent.has_value());
+    if (sent) {
+        CHECK(sent->type == proto::PayloadType::Ack);
+        CHECK_BYTES(sent->path, (Bytes {0x66}));
+    }
+}
+
+// The hop a relay appends is as wide as the packet's hashes
+// (Mesh::routeRecvPacket copies getPathHashSize() bytes of the key). A one-byte
+// hop could not be pushed onto a two-byte path, and the packet was silently
+// never repeated.
+// tag(4) auth(4) flags(1), then the route; the low two flag bits size its hashes.
+static Bytes trace_payload(uint8_t flags, ByteView route) {
+    Bytes p {0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0, flags};
+    p.insert(p.end(), route.begin(), route.end());
+    return p;
+}
+
+// A trace is routed by its payload, not its path: the path is the SNR each hop
+// heard it at. With repeat on, MeshCore sends one on when the next hash in its
+// route is ours, appending what it heard it at.
+static void test_relay_forwards_a_trace_routed_through_us() {
+    Node::Config cfg;
+    cfg.repeat = true;
+    Bench b(cfg);
+    const uint8_t us = b.us();
+
+    const Bytes route = trace_payload(0, Bytes {0x66, us, 0x66});
+    proto::Packet p;
+    p.type = proto::PayloadType::Trace;
+    p.route = proto::RouteType::Direct;
+    p.path = {0x28};  // the first hop's reading
+    p.payload = route;
+    b.radio.inject(p.encode(), -90, -7.75f);
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+    auto sent = b.last_sent();
+    CHECK(sent.has_value());
+    if (sent) {
+        CHECK(sent->type == proto::PayloadType::Trace);
+        CHECK(sent->is_direct());
+        CHECK_BYTES(sent->path, (Bytes {0x28, 0xE1}));  // -7.75 dB is -31 quarters
+        CHECK_BYTES(sent->payload, route);
+    }
+
+    // Hashes as wide as the flags say: two bytes of our key here.
+    const Bytes wide = trace_payload(1, Bytes {b.self->pub()[0], b.self->pub()[1]});
+    b.inject(proto::PayloadType::Trace, proto::RouteType::Direct, {}, wide);
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {2});
+    sent = b.last_sent();
+    if (sent) CHECK_BYTES(sent->path, (Bytes {0x18}));  // the bench's 6 dB
+
+    // Somebody else's turn, and a trace that has reached the end of its route.
+    b.inject(proto::PayloadType::Trace, proto::RouteType::Direct, {},
+             trace_payload(0, Bytes {0x66, us}));
+    b.inject(proto::PayloadType::Trace, proto::RouteType::Direct, {0x10, 0x20},
+             trace_payload(0, Bytes {0x66, us}));
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {2});
+}
+
+// The case that reading a trace's path as a route gets wrong: a reading equal to
+// our hash looks exactly like us being the next hop.
+static void test_trace_readings_are_not_mistaken_for_hops() {
+    Node::Config cfg;
+    cfg.repeat = true;
+    Bench b(cfg);
+    const uint8_t us = b.us();
+    b.inject(proto::PayloadType::Trace, proto::RouteType::Direct, {us},
+             trace_payload(0, Bytes {0x66, 0x77}));
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {0});
+}
+
+static void test_trace_is_not_forwarded_without_repeat() {
+    Bench b;
+    b.inject(proto::PayloadType::Trace, proto::RouteType::Direct, {},
+             trace_payload(0, Bytes {b.us()}));
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {0});
+}
+
+// MeshCore delivers a control packet with its top bit set only at zero hops and
+// never forwards one; without that bit it is direct traffic like any other.
+static void test_zero_hop_control_is_never_forwarded() {
+    Node::Config cfg;
+    cfg.repeat = true;
+    Bench b(cfg);
+    const uint8_t us = b.us();
+    b.inject(proto::PayloadType::Control, proto::RouteType::Direct, {us, 0x66}, {0x80, 1, 2, 3});
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {0});
+
+    b.inject(proto::PayloadType::Control, proto::RouteType::Direct, {us, 0x66}, {0x10, 1, 2, 3});
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+    auto sent = b.last_sent();
+    if (sent) CHECK_BYTES(sent->path, (Bytes {0x66}));
+}
+
+// MeshCore opens a REQ, RESPONSE or ANON_REQ addressed to it before deciding
+// whether to flood it on, and one that opens was for this node and goes no
+// further — even though a companion node answers none of them.
+static void test_relay_does_not_repeat_requests_that_open_for_us() {
+    Node::Config cfg;
+    cfg.repeat = true;
+    Bench b(cfg);
+    const uint8_t us = b.us();
+    const uint8_t them = b.peer->pub()[0];
+
+    auto sends_for = [&](proto::PayloadType type, Bytes payload) {
+        const size_t before = b.radio.send_count();
+        b.inject(type, proto::RouteType::Flood, {0x11}, std::move(payload));
+        b.settle();
+        return b.radio.send_count() - before;
+    };
+    const Bytes request {0x10, 0x20, 0x30, 0x40, 0x01};  // timestamp, request type
+
+    for (auto type : {proto::PayloadType::Req, proto::PayloadType::Response}) {
+        Bytes sealed = proto::DirectEnvelope::seal(us, them, b.shared, request).encode();
+        CHECK_EQ(sends_for(type, sealed), size_t {0});
+
+        // Our first key byte, but no contact's key opens it: somebody else's.
+        Bytes stranger = proto::DirectEnvelope::seal(us, them, Bytes(32, 0x5A), request).encode();
+        CHECK_EQ(sends_for(type, stranger), size_t {1});
+
+        Bytes elsewhere = proto::DirectEnvelope::seal(static_cast<uint8_t>(us ^ 0xFF), them,
+                                                      b.shared, request).encode();
+        CHECK_EQ(sends_for(type, elsewhere), size_t {1});
+    }
+
+    // An anonymous request carries its sender's key, so it opens for us from
+    // somebody who is not a contact at all.
+    auto anon_shared = b.peer->shared_secret(b.self->pub());
+    CHECK(anon_shared.has_value());
+    if (!anon_shared) return;
+    const Bytes a_key = b.a->pubkey;
+    b.contacts.remove(a_key);
+    Bytes anon = proto::AnonReqEnvelope::seal(us, b.peer->pub(), *anon_shared, request).encode();
+    CHECK_EQ(sends_for(proto::PayloadType::AnonReq, anon), size_t {0});
+
+    Bytes tampered = anon;
+    tampered.back() ^= 0x01;
+    CHECK_EQ(sends_for(proto::PayloadType::AnonReq, tampered), size_t {1});
+}
+
+static void test_relay_repeats_with_the_packets_hash_size() {
+    Node::Config cfg;
+    cfg.repeat = true;
+    Bench b(cfg);
+
+    // A group text on a channel we do not hold: nothing to decrypt, and
+    // MeshCore floods it on regardless.
+    proto::TextMessage msg;
+    msg.timestamp = 1700000000;
+    msg.text = from_str("someone: hi");
+    const Bytes key(16, 0x42);
+    const Bytes payload = proto::GroupEnvelope::seal(0xAB, key, msg.encode()).encode();
+    b.inject(proto::PayloadType::GrpTxt, proto::RouteType::Flood, {0x11, 0x22, 0x33, 0x44},
+             payload, /*hash_size=*/2);
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+    auto sent = b.last_sent();
+    CHECK(sent.has_value());
+    if (!sent) return;
+    CHECK(sent->is_flood());
+    CHECK_EQ(sent->path_hash_size, uint8_t {2});
+    CHECK_BYTES(sent->path,
+                (Bytes {0x11, 0x22, 0x33, 0x44, b.self->pub()[0], b.self->pub()[1]}));
+    CHECK_BYTES(sent->payload, payload);
+}
+
+// The flood side of relaying repeats only what Mesh::routeRecvPacket would.
+static void test_relay_repeats_only_what_meshcore_floods_on() {
+    Node::Config cfg;
+    cfg.repeat = true;
+    Bench b(cfg);
+
+    // Sends caused by one injected packet, once everything has settled.
+    auto sends_for = [&](proto::PayloadType type, Bytes payload) {
+        const size_t before = b.radio.send_count();
+        b.inject(type, proto::RouteType::Flood, {0x11}, std::move(payload));
+        b.settle();
+        return b.radio.send_count() - before;
+    };
+    auto last_type = [&] {
+        auto p = b.last_sent();
+        return p ? p->type : proto::PayloadType::RawCustom;
+    };
+
+    // An advert is repeated once its signature verifies, and never before:
+    // every MeshCore node drops a forgery, so a relay that passed one along
+    // would be the one thing on the mesh amplifying it.
+    auto advert = proto::Packet::decode(from_hex(pv::kAdvertPacket));
+    CHECK(advert.has_value());
+    if (!advert) return;
+    Bytes forged = advert->payload;
+    forged.back() ^= 0x01;  // the last byte of the name
+    CHECK_EQ(sends_for(proto::PayloadType::Advert, forged), size_t {0});
+    CHECK_EQ(sends_for(proto::PayloadType::Advert, advert->payload), size_t {1});
+    CHECK(last_type() == proto::PayloadType::Advert);
+
+    // Types MeshCore never flood-routes.
+    const Bytes nine(9, 0x01);
+    CHECK_EQ(sends_for(proto::PayloadType::Trace, nine), size_t {0});
+    CHECK_EQ(sends_for(proto::PayloadType::Control, nine), size_t {0});
+    CHECK_EQ(sends_for(proto::PayloadType::RawCustom, nine), size_t {0});
+    CHECK_EQ(sends_for(proto::PayloadType::Multipart, nine), size_t {0});
+
+    // A text we decrypted was for us: it is answered, not repeated.
+    CHECK_EQ(sends_for(proto::PayloadType::TxtMsg,
+                       b.text_from_a(proto::kTxtPlain, 1700000000, from_str("for us"))),
+             size_t {1});
+    CHECK(last_type() == proto::PayloadType::Path);
+
+    // One for somebody else — a different first key byte — goes on.
+    Bytes elsewhere = b.text_from_a(proto::kTxtPlain, 1700000001, from_str("for them"));
+    elsewhere[0] = static_cast<uint8_t>(b.us() ^ 0xFF);
+    CHECK_EQ(sends_for(proto::PayloadType::TxtMsg, elsewhere), size_t {1});
+    CHECK(last_type() == proto::PayloadType::TxtMsg);
+
+    // An ack that answered our own send is consumed; any other is repeated.
+    auto ack = b.node.send_text(*b.a, "hello", proto::kTxtPlain, pv::kFixedTime);
+    CHECK(ack.has_value());
+    if (!ack) return;
+    b.settle();
+    Bytes ours = *ack;
+    ours.push_back(0x00);
+    ours.push_back(0x5A);
+    CHECK_EQ(sends_for(proto::PayloadType::Ack, ours), size_t {0});
+    CHECK_EQ(b.spy.acks, 1);
+    CHECK_EQ(sends_for(proto::PayloadType::Ack, {9, 8, 7, 6, 5, 4}), size_t {1});
+
+    // Group text goes on whether or not we could read it.
+    proto::TextMessage msg;
+    msg.timestamp = 1700000002;
+    msg.text = from_str("someone: hi");
+    const Bytes key(16, 0x42);
+    CHECK_EQ(sends_for(proto::PayloadType::GrpTxt,
+                       proto::GroupEnvelope::seal(0xAB, key, msg.encode()).encode()),
+             size_t {1});
+}
+
+// MeshCore ignores an advert with no name (BaseChatMesh::onAdvertRecv), so a
+// contact made from one would be a contact no other node on the mesh holds.
+// The packet is still repeated: its signature was good.
+static void test_nameless_advert_is_ignored_but_still_repeated() {
+    Node::Config cfg;
+    cfg.repeat = true;
+    Bench b(cfg);
+
+    proto::AdvertAppData app;
+    app.flags = proto::kAdvTypeChat;  // no name bit, no name
+    proto::Advert adv = proto::Advert::create(*b.peer, pv::kFixedTime, app);
+    b.inject(proto::PayloadType::Advert, proto::RouteType::Flood, {}, adv.encode());
+    CHECK_EQ(b.a->adv_timestamp, uint32_t {0});
+    CHECK(b.a->name.empty());
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+
+    // The name bit set over nothing is the same thing to MeshCore: hasName()
+    // looks at the first byte of the name, not at the flag.
+    app.flags = proto::kAdvTypeChat | proto::kAdvHasName;
+    adv = proto::Advert::create(*b.peer, pv::kFixedTime + 1, app);
+    b.inject(proto::PayloadType::Advert, proto::RouteType::Flood, {}, adv.encode());
+    CHECK_EQ(b.a->adv_timestamp, uint32_t {0});
+
+    // With a name, as every real advert has, it lands.
+    app.name = "A";
+    adv = proto::Advert::create(*b.peer, pv::kFixedTime + 2, app);
+    b.inject(proto::PayloadType::Advert, proto::RouteType::Flood, {}, adv.encode());
+    CHECK_EQ(b.a->adv_timestamp, pv::kFixedTime + 2);
+    CHECK(b.a->name == "A");
+}
+
+// MeshCore drops a text of a type it does not know, without an ack, and a group
+// text whose type bits are set likewise. Delivering them would hand the app
+// bytes with a meaning nobody has defined; acking them would commit to a hash
+// rule the new type may not share.
+static void test_unknown_text_types_are_dropped_unacked() {
+    Bench b;
+
+    b.inject(proto::PayloadType::TxtMsg, proto::RouteType::Direct, {},
+             b.text_from_a(5, 1700000000, from_str("future")));
+    CHECK(!b.node.has_messages());
+    b.settle();
+    CHECK_EQ(b.radio.send_count(), size_t {0});
+
+    auto group = [&](uint8_t txt_type) {
+        proto::TextMessage msg;
+        msg.timestamp = 1700000000 + txt_type;
+        msg.txt_type = txt_type;
+        msg.text = from_str("someone: hi");
+        const Channel pub = Channel::public_channel();
+        return proto::GroupEnvelope::seal(pub.hash(), pub.secret, msg.encode()).encode();
+    };
+    b.inject(proto::PayloadType::GrpTxt, proto::RouteType::Flood, {}, group(1));
+    CHECK(!b.node.has_messages());
+    b.inject(proto::PayloadType::GrpTxt, proto::RouteType::Flood, {}, group(0));
+    CHECK(b.node.has_messages());
+}
+
+// A signed message carries the sender's key prefix between the header and the
+// text. The prefix is raw key bytes, so a zero in it is not a terminator:
+// MeshCore reads the text from byte 9 and hashes 9 + strlen(&data[9]) with the
+// recipient's key. Scanning from byte 5 found one byte of "text" and an ack
+// that never matched, for one room server in sixty-odd.
+static void test_signed_text_is_read_and_acked_from_byte_nine() {
+    Bench b;
+
+    Bytes text {0xAA, 0x00, 0xBB, 0xCC};  // a prefix with a zero in it
+    put_bytes(text, from_str("hi"));
+    proto::TextMessage msg;
+    msg.timestamp = 1700000000;
+    msg.txt_type = proto::kTxtSignedPlain;
+    msg.text = text;
+    const Bytes plaintext = msg.encode();
+    b.inject(proto::PayloadType::TxtMsg, proto::RouteType::Direct, {},
+             proto::DirectEnvelope::seal(b.us(), b.peer->pub()[0], b.shared, plaintext).encode());
+
+    auto got = b.node.pop_message();
+    CHECK(got.has_value());
+    if (got) {
+        CHECK(got->text == "hi");
+        CHECK_EQ(got->txt_type, uint8_t {proto::kTxtSignedPlain});
+    }
+
+    // The ack: SHA-256 over all eleven bytes and our own key, not over the six
+    // before the zero.
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+    auto sent = b.last_sent();
+    CHECK(sent.has_value());
+    if (!sent) return;
+    CHECK(sent->type == proto::PayloadType::Ack);
+    Bytes hashed = plaintext;  // 4 + 1 + 4 + 2 = 11 bytes, nothing to pad
+    put_bytes(hashed, b.self->pub());
+    CHECK_BYTES(subview(sent->payload, 0, 4), crypto::ack_hash(hashed));
+}
+
+// A returned path with wider hashes than routing can write is not stored, but
+// the reciprocal path still goes back down it as given: Mesh::onRecvPacket
+// sends it along the path from the packet, whatever its width.
+static void test_wide_hash_path_return_is_answered_down_the_path_given() {
+    Bench b;
+
+    proto::PathReturn ret;
+    ret.path = {0x33, 0x34};
+    ret.path_hash_size = 2;
+    b.inject(proto::PayloadType::Path, proto::RouteType::Flood, {0x44},
+             proto::DirectEnvelope::seal(b.us(), b.peer->pub()[0], b.shared, ret.encode())
+                 .encode());
+
+    CHECK(!b.a->path_known);
+    CHECK_EQ(b.radio.send_count(), size_t {1});
+    auto sent = b.last_sent();
+    CHECK(sent.has_value());
+    if (!sent) return;
+    CHECK(sent->type == proto::PayloadType::Path);
+    CHECK(sent->is_direct());
+    CHECK_EQ(sent->path_hash_size, uint8_t {2});
+    CHECK_BYTES(sent->path, (Bytes {0x33, 0x34}));
+    auto back = b.open_path_return(*sent);
+    CHECK(back.has_value());
+    if (back) CHECK_BYTES(back->path, (Bytes {0x44}));
 }
 
 static void test_inbox_drops_oldest_when_full() {
@@ -1469,6 +2082,21 @@ int main() {
     test_direct_ack_marks_store_dirty();
     test_flood_message_is_answered_with_a_path_return();
     test_flood_path_return_is_reciprocated();
+    test_flood_paths_are_not_turned_into_routes();
+    test_flood_ack_from_a_routed_contact_is_offered_the_route_again();
+    test_in_transit_direct_packets_are_not_opened();
+    test_relay_forwards_direct_packets_through_us();
+    test_relay_forwards_a_trace_routed_through_us();
+    test_trace_readings_are_not_mistaken_for_hops();
+    test_trace_is_not_forwarded_without_repeat();
+    test_zero_hop_control_is_never_forwarded();
+    test_relay_does_not_repeat_requests_that_open_for_us();
+    test_relay_repeats_with_the_packets_hash_size();
+    test_relay_repeats_only_what_meshcore_floods_on();
+    test_nameless_advert_is_ignored_but_still_repeated();
+    test_unknown_text_types_are_dropped_unacked();
+    test_signed_text_is_read_and_acked_from_byte_nine();
+    test_wide_hash_path_return_is_answered_down_the_path_given();
     test_inbox_drops_oldest_when_full();
     test_inbox_eviction_is_counted();
     test_inbox_survives_a_restart();

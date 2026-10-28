@@ -62,7 +62,10 @@ state writer, companion server — because each stage needs the one before it.
   (ack < response < direct < flood < repeat < advert). A queued packet's expiry is derived from its
   priority, so low-priority traffic is dropped rather than delaying something urgent.
 - **`Node`** routes between the radio and the app: it builds our adverts, decides what each received
-  payload means, and repeats flood traffic. Delivery guarantees are not its job.
+  payload means, and — with `repeat` on — relays as MeshCore's companion does with repeat enabled:
+  flood traffic is repeated and direct traffic whose next hop is us is forwarded. The two are a
+  pair: a node that appends its hash to flood paths ends up on the routes peers build from them.
+  Delivery guarantees are not its job.
 - **`ReliableSender`** owns retries: four attempts (the attempt number is two bits on the wire),
   8/16/32 seconds apart, with the last escalating to flood because a stale direct path is the usual
   reason an ack never comes. **`MessageInbox`** owns the receive queue the app pops from.
@@ -99,12 +102,29 @@ Violating any of these produces bugs that only appear against real firmware:
   than the stored one is rejected as a replay.
 - **A contact's path field is a fixed 64 bytes on the wire**, regardless of the hop count in
   `path_len`; read it as such.
-- **MeshCore learns routes only from returned paths, never from adverts.** A peer that has heard
-  our advert still floods every packet at us until it receives a `PATH`, so a flood-routed message
-  from a known contact is answered with one: the inbound path *unreversed* — that is the direction
-  their packets will travel — with the ack bundled in as `extra`, so the reply is still one
-  transmission. A flood-routed `PATH` gets a reciprocal one back, sent direct, which is what ends
-  the exchange rather than trading them for ever.
+- **Routes come only from returned paths, never from adverts or from reversing a flood path.**
+  That is MeshCore's rule and it is ours: a peer's packet reversed is a guess about links nobody has
+  used, and a wrong guess installed over a route the peer actually told us costs three direct
+  attempts before the ladder floods. A peer that has heard our advert still floods every packet at
+  us until it receives a `PATH`, so a flood-routed message from a known contact is answered with
+  one: the inbound path *unreversed* — that is the direction their packets will travel — with the
+  ack bundled in as `extra`, so the reply is still one transmission. That reply is **flooded**, as
+  `BaseChatMesh::onPeerDataRecv` floods it: we hold no route to the sender either, and sent down a
+  guessed one it takes the ack with it when the guess is wrong. A flood-routed `PATH` gets a
+  reciprocal one back, sent direct along the route it carried, which is what ends the exchange
+  rather than trading them for ever; and a flood-routed ack from a contact we hold a route for
+  means our `PATH` never arrived, so the route is offered again, direct, three seconds later
+  (`handleReturnPathRetry`).
+- **A direct-routed packet with hops left on its path is in transit, not for us.** MeshCore reads
+  an ack out of one early and otherwise does not decrypt it; with `repeat` on it is forwarded when
+  we are the next hop, our hop popped, at ack priority. Two kinds are exempt, and checked first: a
+  TRACE's path is not a route but the SNR each hop heard it at, so it goes on when the next hash in
+  its *payload* is ours, with our reading appended; and a CONTROL packet with its top bit set is
+  zero-hop only and never forwarded. The flood side repeats only what
+  `Mesh::routeRecvPacket` would: not a packet that was for us — a text, path or request that
+  opens under one of our keys, even one we cannot answer — not an ack that matched, not an
+  advert that failed to verify, and never TRACE, MULTIPART, CONTROL, RAW_CUSTOM or a reserved type.
+  The hop appended is as wide as the packet's hashes.
 
 ### Companion protocol
 
@@ -133,9 +153,11 @@ mirrors them in its `protocol/protocol.h`). Never renumber; append only.
   `SET_RADIO_TX_POWER` is the deliberate exception — accepted and ignored with a log line, so the
   app's settings screen still works. Unimplemented commands answer `ERR_UNSUPPORTED_CMD`:
   telemetry, path tracing, room-server login, key import/export, signing, reboot.
-- **Repeater and room-server roles are unimplemented, not ruled out.** The daemon is a companion
-  node today and whether it takes on those roles is undecided, so don't describe them as out of
-  scope and don't foreclose them — but don't start building them either without being asked.
+- **Repeater and room-server roles are unimplemented, not ruled out.** `repeat` relays exactly
+  what MeshCore's companion relays with repeat enabled; the repeater *role* — its CLI, ACLs,
+  transport keys — and the room server are another matter. The daemon is a companion node today and
+  whether it takes on those roles is undecided, so don't describe them as out of scope and don't
+  foreclose them — but don't start building them either without being asked.
 
 ### Radio backend
 

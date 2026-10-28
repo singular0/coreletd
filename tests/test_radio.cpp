@@ -151,7 +151,8 @@ static void test_airtime_uses_the_longer_sfd_at_sf5_and_sf6() {
 
     const double t_sym = std::pow(2.0, p.sf) / (p.bw_khz * 1000.0);
     const double old_preamble = (p.preamble_symbols() + 4.25) * t_sym;
-    const double numerator = 8.0 * 32 - 4.0 * p.sf + 28 + 16;
+    // The SF5/SF6 bit count: CRC and header, no +8 (see the next test).
+    const double numerator = 8.0 * 32 + 16 - 4.0 * p.sf + 20;
     const double n_payload = 8 + std::ceil(numerator / (4.0 * p.sf)) * (4 + (p.cr - 4));
     const auto old_ms =
         static_cast<uint32_t>(std::ceil((old_preamble + n_payload * t_sym) * 1000.0));
@@ -175,12 +176,43 @@ static void test_airtime_uses_the_longer_sfd_at_sf5_and_sf6() {
              static_cast<uint32_t>(std::ceil((fast_preamble + fast_payload * fast_sym) * 1000.0)));
 }
 
+// RadioLib's bit count carries an extra 8 at SF7 and above that the SF5/SF6
+// form of the datasheet formula omits, along with using the longer sync.
+// Keeping it at SF5 costs a whole coding block whenever it tips the ceiling,
+// which it does for a 30-byte packet.
+static void test_airtime_drops_the_header_coefficient_at_sf5_and_sf6() {
+    radio::RadioParams p;
+    p.sf = 5;
+    p.bw_khz = 62.5;
+    ParamsOnlyRadio r(p);
+
+    const double t_sym = std::pow(2.0, p.sf) / (p.bw_khz * 1000.0);
+    const double t_preamble = (p.preamble_symbols() + p.sfd_symbols()) * t_sym;
+    auto model = [&](double numerator) {
+        const double n_payload = 8 + std::ceil(numerator / (4.0 * p.sf)) * (4 + (p.cr - 4));
+        return static_cast<uint32_t>(std::ceil((t_preamble + n_payload * t_sym) * 1000.0));
+    };
+    const uint32_t want = model(8.0 * 30 + 16 - 4.0 * p.sf + 20);
+    const uint32_t with_sf7_coeff = model(8.0 * 30 + 16 - 4.0 * p.sf + 8 + 20);
+    CHECK_EQ(r.airtime_ms(30), want);
+    CHECK(with_sf7_coeff > want);
+
+    // SF7 keeps the coefficient: 8L + 16 - 4SF + 8 + 20 is the whole formula.
+    p.sf = 7;
+    ParamsOnlyRadio s(p);
+    const double t7 = std::pow(2.0, 7) / (p.bw_khz * 1000.0);
+    const double pre7 = (p.preamble_symbols() + p.sfd_symbols()) * t7;
+    const double n7 = 8 + std::ceil((8.0 * 30 + 16 - 28 + 8 + 20) / 28.0) * (4 + (p.cr - 4));
+    CHECK_EQ(s.airtime_ms(30), static_cast<uint32_t>(std::ceil((pre7 + n7 * t7) * 1000.0)));
+}
+
 int main() {
     test_ldro_matches_the_symbol_time_threshold();
     test_the_settings_that_used_to_mismatch();
     test_airtime_follows_the_ldro_bit();
     test_preamble_follows_the_spreading_factor();
     test_airtime_uses_the_longer_sfd_at_sf5_and_sf6();
+    test_airtime_drops_the_header_coefficient_at_sf5_and_sf6();
 
     return finish("radio");
 }

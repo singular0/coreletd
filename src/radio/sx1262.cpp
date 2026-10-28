@@ -523,7 +523,7 @@ bool Sx1262::configure(std::string& error) {
         else if (v <= 3.15) voltage_code = 0x06;  // 3.0V
         else voltage_code = 0x07;                 // 3.3V
 
-        // 10 ms startup delay, in 15.625 us steps.
+        // 5 ms startup delay in 15.625 us steps, RadioLib's default.
         const uint32_t delay = 0x0140;
         Bytes args {voltage_code, static_cast<uint8_t>(delay >> 16),
                     static_cast<uint8_t>(delay >> 8), static_cast<uint8_t>(delay)};
@@ -557,21 +557,14 @@ bool Sx1262::configure(std::string& error) {
                      static_cast<uint8_t>(frf >> 8), static_cast<uint8_t>(frf)};
     if (!cmd(kCmdSetRfFrequency, freq_args)) return fail_with("SetRfFrequency");
 
-    // Image calibration for the band in use.
-    uint8_t img_lo, img_hi;
-    if (params_.freq_mhz >= 900) {
-        img_lo = 0xE1;
-        img_hi = 0xE9;
-    } else if (params_.freq_mhz >= 850) {
-        img_lo = 0xD7;
-        img_hi = 0xDB;
-    } else if (params_.freq_mhz >= 770) {
-        img_lo = 0xC1;
-        img_hi = 0xC5;
-    } else {
-        img_lo = 0x6B;
-        img_hi = 0x6F;
-    }
+    // Image calibration around the frequency in use. The datasheet tabulates
+    // five bands and says to bracket anything else in 4 MHz steps; RadioLib
+    // brackets every frequency that way (calibrateImageRejection over freq
+    // +/- 4 MHz), which is what the firmware on the far end runs, and a table
+    // here left the 470-510 MHz band — which the config accepts — calibrated
+    // for 430 MHz.
+    const uint8_t img_lo = static_cast<uint8_t>(std::floor((params_.freq_mhz - 4.0 - 1.0) / 4.0));
+    const uint8_t img_hi = static_cast<uint8_t>(std::ceil((params_.freq_mhz + 4.0 + 1.0) / 4.0));
     if (!cmd(kCmdCalibrateImage, Bytes {img_lo, img_hi})) return fail_with("CalibrateImage");
 
     // SX1262 high-power PA.

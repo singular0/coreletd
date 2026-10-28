@@ -1,5 +1,6 @@
 #include "radio/radio.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace clt::radio {
@@ -17,7 +18,14 @@ uint32_t Radio::airtime_ms(size_t bytes) const {
     const double t_preamble = (p.preamble_symbols() + p.sfd_symbols()) * t_sym;
 
     const int cr = p.cr >= 5 && p.cr <= 8 ? p.cr - 4 : 4;  // 4/(4+cr)
-    const double numerator = 8.0 * bytes - 4.0 * p.sf + 28 + 16 /* CRC on */;
+    // The datasheet's bit count, as RadioLib's getTimeOnAir has it: payload
+    // bits, the 16-bit CRC, the 20-bit explicit header, less 4 bits per
+    // spreading-factor step — and a further 8 that exist only at SF7 and
+    // above, which the SF5/SF6 form of the formula omits along with its
+    // shorter sync.
+    const double header_coeff = p.sf <= 6 ? 0.0 : 8.0;
+    const double numerator =
+        std::max(8.0 * bytes + 16 /* CRC on */ - 4.0 * p.sf + header_coeff + 20, 0.0);
     const double denominator = 4.0 * (p.sf - (de ? 2 : 0));  // explicit header
     double n_payload = 8 + std::ceil(numerator / denominator) * (4 + cr);
     if (n_payload < 8) n_payload = 8;

@@ -89,10 +89,11 @@ Violating any of these produces bugs that only appear against real firmware:
   Edwards-Y → Montgomery-U, and the 32-byte ladder result *is* the key: AES-128 uses its first 16
   bytes, and the 2-byte MAC is HMAC-SHA256 over the ciphertext keyed with all 32.
 - **`path_length` is not a byte count.** Bits 0–5 are the hop count, bits 6–7 are `hash_size - 1`.
-- **Ack hashes cover the unpadded plaintext.**
-  `SHA256(plaintext_without_trailing_zeros || pubkey)[:4]`, where the key is the *sender's* — except
-  for signed and room messages, where it is the recipient's. Get the padding wrong and acks silently
-  never match, which on the air is indistinguishable from a message that never arrived.
+- **Ack hashes cover the text up to its NUL, not the unpadded plaintext.**
+  `SHA256(timestamp || flags || text_up_to_NUL || pubkey)[:4]`, where the key is the *sender's* —
+  except for signed and room messages, where it is the recipient's and the text starts at byte 9,
+  after a 4-byte key prefix that can itself contain a zero. Hash a byte too few or too many and acks
+  silently never match, which on the air is indistinguishable from a message that never arrived.
 - **Dedup must ignore the path**, since a packet's path mutates at every hop.
 - **Adverts are only trusted after the signature verifies**, and one whose timestamp is not newer
   than the stored one is rejected as a replay.

@@ -130,7 +130,9 @@ struct TextMessage {
     // ack different from a third's.
     uint8_t extended_attempt = 0;
     // For kTxtSignedPlain the first 4 bytes of `text` are the sender's pubkey
-    // prefix; `sender_prefix()` splits it out.
+    // prefix; `sender_prefix()` splits it out. They are raw key bytes, so the
+    // C string that follows them is found from byte 9, never by scanning the
+    // prefix for a terminator.
     Bytes text;
 
     static std::optional<TextMessage> decode(ByteView plaintext);
@@ -143,7 +145,9 @@ struct TextMessage {
 // Trailing zero bytes are AES padding, not message content.
 ByteView strip_zero_padding(ByteView plaintext);
 
-// The bytes an ack hash covers: timestamp(4) + flags(1) + strlen(text).
+// The bytes an ack hash covers: timestamp(4) + flags(1) + strlen(text), where
+// a signed message's text begins after its 4-byte sender prefix — MeshCore
+// hashes 9 + strlen(&data[9]) for those, and the prefix can contain a zero.
 //
 // Not the same rule as "drop the trailing zeros". MeshCore hashes a C string in
 // a fixed buffer, so the region ends at the first NUL after the header, and the

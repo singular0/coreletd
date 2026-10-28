@@ -1,5 +1,7 @@
 #include "proto/payloads.h"
 
+#include <algorithm>
+
 #include "crypto/crypto.h"
 #include "util/hex.h"
 #include "util/log.h"
@@ -214,6 +216,28 @@ GroupEnvelope GroupEnvelope::seal(uint8_t channel_hash, ByteView key, ByteView p
 // Bodies
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// timestamp(4) + flags(1). An empty body hashes exactly this much.
+constexpr size_t kTextHeaderSize = 5;
+// A signed message carries the sender's key prefix between the header and the
+// text, so the C string — and the region MeshCore hashes for the ack — begins
+// at byte 9 rather than byte 5 (BaseChatMesh::onPeerDataRecv reads &data[9]).
+// The prefix is raw key bytes: one key in sixty-odd has a zero among its first
+// four, and scanning for the terminator from the header would stop there.
+constexpr size_t kSignedPrefixSize = 4;
+
+// Where the text begins, clamped to the plaintext so a short buffer is safe.
+size_t text_offset(ByteView plaintext) {
+    if (plaintext.size() < kTextHeaderSize) return plaintext.size();
+    const uint8_t txt_type = static_cast<uint8_t>(plaintext[4] >> 2);
+    const size_t at = txt_type == kTxtSignedPlain ? kTextHeaderSize + kSignedPrefixSize
+                                                  : kTextHeaderSize;
+    return std::min(at, plaintext.size());
+}
+
+}  // namespace
+
 std::optional<TextMessage> TextMessage::decode(ByteView plaintext) {
     Reader r(plaintext);
     uint32_t timestamp = r.u32();
@@ -229,9 +253,11 @@ std::optional<TextMessage> TextMessage::decode(ByteView plaintext) {
     // The text is a C string: it ends at the first NUL, and anything after
     // that is either AES padding or the extended attempt byte. Stripping
     // trailing zeros instead would hand the app "text\0<attempt>" whenever the
-    // sender was past its third try.
+    // sender was past its third try. On a signed message the string starts
+    // after the sender's key prefix, which is raw key bytes and can contain a
+    // zero of its own.
     ByteView rest = r.rest();
-    size_t end = 0;
+    size_t end = text_offset(plaintext) - kTextHeaderSize;
     while (end < rest.size() && rest[end] != 0) end++;
     m.text.assign(rest.begin(), rest.begin() + end);
     // MeshCore reads this byte unconditionally, so on a padded message it is
@@ -264,12 +290,9 @@ ByteView strip_zero_padding(ByteView plaintext) {
     return subview(plaintext, 0, n);
 }
 
-// timestamp(4) + flags(1). An empty body hashes exactly this much.
-constexpr size_t kTextHeaderSize = 5;
-
 ByteView ack_hashed_region(ByteView plaintext) {
     if (plaintext.size() <= kTextHeaderSize) return plaintext;
-    size_t end = kTextHeaderSize;
+    size_t end = text_offset(plaintext);
     while (end < plaintext.size() && plaintext[end] != 0) end++;
     return subview(plaintext, 0, end);
 }

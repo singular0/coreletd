@@ -220,6 +220,32 @@ static void test_padded_message_has_no_extended_attempt() {
     if (msg) CHECK(msg->body() == "hello");
 }
 
+// A signed message's text begins at byte 9, after a 4-byte sender prefix that
+// is raw key bytes: MeshCore hashes 9 + strlen(&data[9]) and hands the UI
+// &data[9]. Scanning from byte 5 stops at a zero in the prefix.
+static void test_signed_text_starts_after_the_prefix() {
+    Bytes plaintext {0x01, 0x02, 0x03, 0x04, static_cast<uint8_t>(kTxtSignedPlain << 2)};
+    put_bytes(plaintext, Bytes {0xAA, 0x00, 0xBB, 0xCC});
+    put_bytes(plaintext, from_str("hi"));
+    plaintext.resize(16, 0);
+
+    CHECK_EQ(ack_hashed_region(plaintext).size(), size_t {11});  // 9 + strlen("hi")
+    CHECK_EQ(ack_extended_attempt(plaintext), uint8_t {0});
+    auto msg = TextMessage::decode(plaintext);
+    CHECK(msg.has_value());
+    if (!msg) return;
+    CHECK_BYTES(msg->sender_prefix(), (Bytes {0xAA, 0x00, 0xBB, 0xCC}));
+    CHECK(msg->body() == "hi");
+
+    // A plain message with the same bytes is read from byte 5, where the zero
+    // ends it: there, the prefix is text as far as the format knows.
+    plaintext[4] = kTxtPlain << 2;
+    CHECK_EQ(ack_hashed_region(plaintext).size(), size_t {6});
+    auto plain = TextMessage::decode(plaintext);
+    CHECK(plain.has_value());
+    if (plain) CHECK_EQ(plain->text.size(), size_t {1});
+}
+
 // Two acks for the same message must not be the same packet, or every repeater
 // in between suppresses the second as a duplicate and a retry's ack gets one
 // chance to cross the mesh.
@@ -495,6 +521,7 @@ int main() {
     test_ack_region_of_an_empty_body_is_just_the_header();
     test_ack_region_stops_before_the_extended_attempt();
     test_padded_message_has_no_extended_attempt();
+    test_signed_text_starts_after_the_prefix();
     test_ack_payload_is_unique_per_send();
     test_path_encoding();
     test_path_manipulation();

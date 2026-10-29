@@ -17,6 +17,37 @@ the crypto and codec tests evidence of wire compatibility rather than self-consi
 as ground truth: if the protocol changes, the new bytes have to be sourced from another
 implementation again, not adjusted to match ours.
 
+## meshcore-cli compatibility
+
+`cli_compat_test.py` runs [`meshcore-cli`](https://github.com/fdlamotte/meshcore-cli) against the
+daemon with no hardware at all. It drives `build/coreletd_sim`: the whole daemon, wired exactly as
+`main()` wires it and serving TCP, with the radio replaced by a simulated air that one scripted
+MeshCore peer is on. The peer decrypts what the daemon transmits, acks its messages, and sends
+adverts, messages and returned paths when told to.
+
+```
+    meshcore-cli ──TCP──▶ coreletd_sim ┄┄ simulated air ┄┄ scripted MeshCore peer
+```
+
+Every check asserts on both ends: what the client printed and what the peer decoded off the air.
+A message typed into the client has to reach the peer with the same text, the peer's ack has to
+come back as a delivery receipt, and the peer's messages have to come out of the client's inbox
+intact — waiting ones, and one pushed while the client listens. Contacts, routes, channels,
+adverts, the contact card, the clock and the commands the daemon refuses are covered too.
+
+```sh
+cmake --build build                       # builds coreletd_sim with the tests
+tools/cli_compat_test.py                  # meshcore-cli from PATH
+tools/cli_compat_test.py --meshcli ~/venv/bin/meshcli --verbose
+tools/cli_compat_test.py --keep           # keep the daemon log and state
+```
+
+It takes under a minute; fifteen seconds of that is meshcore-cli waiting out its own timeout on
+a refused name change, because it does not expect `RESP_DISABLED` there. meshcore-cli runs with
+`HOME` pointed at a scratch directory, so the init scripts and message log in its
+`~/.config/meshcore` are neither run nor written. What this proves is the companion protocol as
+that client speaks it; whether real firmware accepts our packets is the next section's question.
+
 ## Hardware end-to-end test
 
 `hw_e2e_test.py` is the one that needs no simulation: it deploys the working tree to a uConsole,

@@ -178,6 +178,13 @@ if(CORELETD_BUILD_TESTS)
         add_test(NAME ${t} COMMAND test_${t})
     endforeach()
 
+    # Not a test: the daemon on a simulated radio, serving TCP, for driving with
+    # real companion clients. tools/cli_compat_test.py runs meshcore-cli
+    # against it; built here so it compiles with everything else.
+    add_executable(coreletd_sim tests/coreletd_sim.cpp)
+    target_link_libraries(coreletd_sim PRIVATE coreletd_core)
+    target_include_directories(coreletd_sim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
     # The resolver decides what every package and binary calls itself, and it
     # runs before any C++ exists, so it is tested on its own: the test builds
     # throwaway repositories and checks what each one resolves to.

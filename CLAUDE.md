@@ -33,6 +33,8 @@ Sources are listed explicitly in `CMakeLists.txt`; a new `.cpp` must be added th
 won't compile. Tests are one CTest binary per `tests/test_<name>.cpp`, registered by the `foreach`
 in the same file — a new test file needs its name added to that list. The `version` test is the
 exception: a CMake script, registered beside them, that exercises the resolver described below.
+`tests/coreletd_sim.cpp` is not a test at all: it builds `coreletd_sim`, the daemon on a simulated
+radio with a scripted peer, which `tools/cli_compat_test.py` drives meshcore-cli against.
 
 ## Architecture
 
@@ -214,6 +216,11 @@ uConsole, runs against the real SX1262, and asserts against a second independent
 the air — the only test that proves the driver keys the radio and that another vendor's firmware
 accepts our packets. It needs the host named explicitly (`--host`, or `CORELETD_E2E_HOST`); the node
 identity is deliberately kept between runs so peers don't accumulate dead contacts.
+
+`tools/cli_compat_test.py` needs no hardware: it runs meshcore-cli against `coreletd_sim` and
+asserts on what the client printed and what the simulated peer decoded off the air. Run it after
+touching `Session` or anything a companion command reaches; it is not registered with CTest, since
+meshcore-cli is not a build dependency.
 
 The validated-on-hardware run behind the README's claim: uConsole (CM4, Debian trixie) + AIO v2
 against a LilyGo T-Echo on MeshCore v1.17.0, 869.618 MHz — adverts signature-verified (RSSI −41,

@@ -187,6 +187,16 @@ tests.
 `[radio] lora_freq` deliberately has no default: transmitting on the wrong band is a legal problem,
 so the daemon refuses to start rather than picking one.
 
+`[storage] state_dir` has none either, and is the only storage setting: every state file sits in it
+under a fixed name, so the directory is the whole of a backup. It must be absolute and must already
+exist — the daemon never creates it, because a path that isn't there is likelier a typo than a first
+run, and creating it would quietly mint a new node. The old default guessed from the effective uid,
+which made `sudo coreletd` and `coreletd` two different nodes. For the same reason a missing
+`identity` beside existing `contacts`, `channels` or `messages` stops startup rather than generating
+a key. The shipped `coreletd.ini` sets it to `/var/lib/coreletd`, which is what the unit's
+`StateDirectory=` creates; `ProtectSystem=strict` makes any other path read-only, so a mismatch fails
+at startup.
+
 ## Testing
 
 ```sh
@@ -291,6 +301,10 @@ are pointed at for all of this; keep it in step with the README's setup section.
 - Warnings are `-Wall -Wextra -Wpedantic`; keep new code clean.
 - Namespace is `clt`, with `clt::mesh`, `clt::proto`, `clt::radio`, `clt::crypto`, `clt::companion`.
 - Message content is logged only at trace level. Nothing above it should print what people wrote.
+- State is written through `durable_replace()` (`util/persist.h`), which is what makes it atomic,
+  durable and `0600`. A new store that writes its file any other way gets none of the three. Its
+  file goes in `state_dir` under a fixed name, with an accessor beside the others on `Config`, and
+  belongs in `restrict_state_files()` in `daemon/app.cpp` too.
 - Comments explain *why* a thing is the way it is — a wire quirk, a hardware constraint, a decision
   that looks wrong without the context. Match that register rather than narrating what the code
   does.

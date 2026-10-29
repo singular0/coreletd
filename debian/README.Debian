@@ -64,6 +64,29 @@ to discard the node identity:
     sudo deluser coreletd
     sudo delgroup coreletd
 
+Everything in /var/lib/coreletd is private to the `coreletd` user: the
+directory is 0700 and every file in it 0600 -- the identity, the channel
+secrets in `channels`, and messages waiting for an app in `messages`.
+Membership of the `coreletd` group grants the socket and the radio, not the
+state, so read or back it up with sudo.
+
+The directory is the whole node and a copy of it is a complete backup. Each
+file is replaced atomically, so it can be taken while the service runs:
+
+    sudo tar -C /var/lib -czf coreletd-backup.tar.gz coreletd
+
+The archive holds the private key; keep it private too. Restore with the
+service stopped, since a running daemon writes its own state over the
+restored files at its next save, and leave the files owned by `coreletd`:
+
+    sudo systemctl stop coreletd
+    sudo tar -C /var/lib -xzf coreletd-backup.tar.gz
+    sudo chown -R coreletd:coreletd /var/lib/coreletd
+    sudo systemctl start coreletd
+
+If the identity is missing while the other files are present, the daemon
+refuses to start rather than generate a new node on top of them.
+
 Companion protocol access
 -------------------------
 

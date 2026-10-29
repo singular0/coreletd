@@ -11,6 +11,10 @@
 using namespace clt;
 using namespace clt::test;
 
+// The two settings with no default, which every config meant to load carries.
+static const std::string kRequired =
+    "[storage]\nstate_dir = /var/lib/coreletd\n[radio]\nlora_freq = 869.618\n";
+
 static std::string write_temp(const std::string& body) {
     std::string path = "/tmp/coreletd_test_ini.ini";
     std::ofstream out(path, std::ios::trunc);
@@ -135,36 +139,30 @@ static void test_unread_keys_are_tracked() {
 
 static void test_retry_interval() {
     // Absent: the radio is retried every 10 s by default.
-    std::string path = write_temp("[radio]\nlora_freq = 869.618\n");
+    std::string path = write_temp(kRequired);
     Config def;
     std::string error;
     CHECK(def.load(path, error));
     CHECK_EQ(def.spi.retry_interval_s, uint32_t {10});
 
-    path = write_temp(
-        "[radio]\n"
-        "lora_freq = 869.618\n"
-        "[hardware]\n"
-        "lora_retry_interval = 45\n");
+    path = write_temp(kRequired +
+                      "[hardware]\n"
+                      "lora_retry_interval = 45\n");
     Config cfg;
     CHECK(cfg.load(path, error));
     CHECK_EQ(cfg.spi.retry_interval_s, uint32_t {45});
 
     // 0 is meaningful: it turns retrying off entirely.
-    path = write_temp(
-        "[radio]\n"
-        "lora_freq = 869.618\n"
-        "[hardware]\n"
-        "lora_retry_interval = 0\n");
+    path = write_temp(kRequired +
+                      "[hardware]\n"
+                      "lora_retry_interval = 0\n");
     Config off;
     CHECK(off.load(path, error));
     CHECK_EQ(off.spi.retry_interval_s, uint32_t {0});
 
-    path = write_temp(
-        "[radio]\n"
-        "lora_freq = 869.618\n"
-        "[hardware]\n"
-        "lora_retry_interval = -5\n");
+    path = write_temp(kRequired +
+                      "[hardware]\n"
+                      "lora_retry_interval = -5\n");
     Config bad;
     std::string bad_error;
     CHECK(!bad.load(path, bad_error));
@@ -174,31 +172,27 @@ static void test_retry_interval() {
 }
 
 static void test_companion_interfaces() {
-    std::string path = write_temp("[radio]\nlora_freq = 869.618\n");
+    std::string path = write_temp(kRequired);
     Config def;
     std::string error;
     CHECK(def.load(path, error));
     CHECK(def.companion.transport == companion::Server::Transport::Unix);
     CHECK(def.companion.socket_path == "/run/coreletd/companion.sock");
 
-    path = write_temp(
-        "[radio]\n"
-        "lora_freq = 869.618\n"
-        "[companion]\n"
-        "companion_interface = tcp\n"
-        "companion_bind = 127.0.0.2\n"
-        "companion_port = 6000\n");
+    path = write_temp(kRequired +
+                      "[companion]\n"
+                      "companion_interface = tcp\n"
+                      "companion_bind = 127.0.0.2\n"
+                      "companion_port = 6000\n");
     Config tcp;
     CHECK(tcp.load(path, error));
     CHECK(tcp.companion.transport == companion::Server::Transport::Tcp);
     CHECK(tcp.companion.bind_addr == "127.0.0.2");
     CHECK_EQ(tcp.companion.port, uint16_t {6000});
 
-    path = write_temp(
-        "[radio]\n"
-        "lora_freq = 869.618\n"
-        "[companion]\n"
-        "companion_interface = serial\n");
+    path = write_temp(kRequired +
+                      "[companion]\n"
+                      "companion_interface = serial\n");
     Config bad;
     std::string bad_error;
     CHECK(!bad.load(path, bad_error));
@@ -215,8 +209,7 @@ static std::string as_sectioned_setting(const std::string& setting) {
 }
 
 static void check_config_rejected(const std::string& setting) {
-    std::string path =
-        write_temp("[radio]\nlora_freq = 869.618\n" + as_sectioned_setting(setting));
+    std::string path = write_temp(kRequired + as_sectioned_setting(setting));
     Config cfg;
     std::string error;
     CHECK(!cfg.load(path, error));
@@ -224,8 +217,7 @@ static void check_config_rejected(const std::string& setting) {
 }
 
 static void check_config_accepted(const std::string& setting) {
-    std::string path =
-        write_temp("[radio]\nlora_freq = 869.618\n" + as_sectioned_setting(setting));
+    std::string path = write_temp(kRequired + as_sectioned_setting(setting));
     Config cfg;
     std::string error;
     CHECK(cfg.load(path, error));
@@ -280,7 +272,7 @@ static void test_advert_name_must_fit_the_advert() {
 
     // With lat/lon the eight bytes they cost come out of the same budget.
     auto with_location = [](size_t name_len) {
-        return "[radio]\nlora_freq = 869.618\n[node]\nlat = 51.5\nlon = -0.1\nadvert_name = " +
+        return kRequired + "[node]\nlat = 51.5\nlon = -0.1\nadvert_name = " +
                std::string(name_len, 'x') + "\n";
     };
     {
@@ -300,7 +292,7 @@ static void test_advert_name_must_fit_the_advert() {
     // default. Worth pinning, because a nameless node is invisible to chat
     // clients even when its signature verifies.
     {
-        std::string path = write_temp("[radio]\nlora_freq = 869.618\n[node]\nadvert_name =\n");
+        std::string path = write_temp(kRequired + "[node]\nadvert_name =\n");
         Config cfg;
         std::string error;
         CHECK(cfg.load(path, error));
@@ -326,6 +318,8 @@ static void test_maximal_appdata_fits_what_meshcore_verifies() {
 
 static void test_config_accepts_valid_boundaries() {
     std::string path = write_temp(
+        "[storage]\n"
+        "state_dir = /var/lib/coreletd\n"
         "[radio]\n"
         "lora_freq = 150\n"
         "lora_bw = 7.81\n"
@@ -359,11 +353,43 @@ static void test_config_accepts_valid_boundaries() {
 }
 
 static void test_config_requires_sections() {
-    std::string path = write_temp("lora_freq = 869.618\n");
+    std::string path =
+        write_temp("lora_freq = 869.618\n[storage]\nstate_dir = /var/lib/coreletd\n");
     Config cfg;
     std::string error;
     CHECK(!cfg.load(path, error));
     CHECK(error.find("radio.lora_freq") != std::string::npos);
+    std::remove(path.c_str());
+}
+
+// No default and no relative paths: either would make which node starts depend
+// on who started it, and from where.
+static void test_state_dir_is_required_and_absolute() {
+    std::string path = write_temp("[radio]\nlora_freq = 869.618\n");
+    Config missing;
+    std::string error;
+    CHECK(!missing.load(path, error));
+    CHECK(error.find("storage.state_dir") != std::string::npos);
+
+    path = write_temp("[storage]\nstate_dir = coreletd\n[radio]\nlora_freq = 869.618\n");
+    Config relative;
+    error.clear();
+    CHECK(!relative.load(path, error));
+    CHECK(error.find("absolute") != std::string::npos);
+
+    path = write_temp("[storage]\nstate_dir = ~/coreletd\n[radio]\nlora_freq = 869.618\n");
+    Config tilde;
+    CHECK(!tilde.load(path, error));
+
+    // The state files sit inside it under fixed names, however it was spelled.
+    path = write_temp("[storage]\nstate_dir = /srv/node/\n[radio]\nlora_freq = 869.618\n");
+    Config cfg;
+    CHECK(cfg.load(path, error));
+    cfg.finalise();
+    CHECK(cfg.identity_path() == "/srv/node/identity");
+    CHECK(cfg.channels_path() == "/srv/node/channels");
+    CHECK(cfg.node.messages_path == "/srv/node/messages");
+
     std::remove(path.c_str());
 }
 
@@ -440,6 +466,7 @@ int main() {
     test_maximal_appdata_fits_what_meshcore_verifies();
     test_config_accepts_valid_boundaries();
     test_config_requires_sections();
+    test_state_dir_is_required_and_absolute();
     test_shipped_ini_matches_the_settings_table();
     return finish("ini");
 }

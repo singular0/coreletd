@@ -1,6 +1,7 @@
 #include "util/persist.h"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -62,6 +63,14 @@ bool durable_replace(const std::string& tmp_path, const std::string& path, std::
         error = "cannot open " + tmp_path + " for syncing: " + std::strerror(errno);
         return false;
     }
+    // An existing temporary — left by a save that crashed — keeps its old mode
+    // through the truncating open that rewrote it, so the umask alone is not
+    // enough even where it is strict.
+    if (::fchmod(tmp_fd, S_IRUSR | S_IWUSR) != 0) {
+        error = "cannot restrict " + tmp_path + " to its owner: " + std::strerror(errno);
+        ::close(tmp_fd);
+        return false;
+    }
     if (!sync_and_close(tmp_fd, tmp_path, error)) return false;
 
     if (keep_backup) {
@@ -116,6 +125,26 @@ std::string quarantine(const std::string& path) {
     }
     LOG_WARN("%s could not be read; kept as %s", path.c_str(), dest.c_str());
     return dest;
+}
+
+void restrict_to_owner(const std::string& path) {
+    struct stat st {};
+    if (::stat(path.c_str(), &st) != 0) {
+        if (errno != ENOENT) LOG_WARN("cannot inspect %s: %s", path.c_str(), std::strerror(errno));
+        return;
+    }
+    // A path pointed at a device — /dev/null, to keep nothing — is not ours to
+    // narrow, and neither is anything else that is not a plain file.
+    if (!S_ISREG(st.st_mode) || (st.st_mode & (S_IRWXG | S_IRWXO)) == 0) return;
+    // Only ever takes access away: an owner who made a file read-only for
+    // themselves keeps it that way.
+    if (::chmod(path.c_str(), st.st_mode & S_IRWXU) != 0) {
+        LOG_WARN("%s is open to other users and cannot be restricted: %s", path.c_str(),
+                 std::strerror(errno));
+        return;
+    }
+    LOG_WARN("%s was open to other users (mode %04o); restricted it to its owner", path.c_str(),
+             static_cast<unsigned>(st.st_mode & 07777));
 }
 
 }  // namespace clt

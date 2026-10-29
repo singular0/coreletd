@@ -1,5 +1,6 @@
 #include <getopt.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -75,6 +76,13 @@ int main(int argc, char** argv) {
     if (verbosity == 1) cfg.log_level = clt::LogLevel::Debug;
     if (verbosity >= 2) cfg.log_level = clt::LogLevel::Trace;
     clt::log_set_level(cfg.log_level);
+
+    // Saves are restricted to 0600 before they are installed, but a temporary
+    // is written in full first, and under the usual 022 anyone who can reach
+    // the directory could open it in that window and keep reading. Nothing the
+    // daemon creates is meant for other users; the companion socket sets its
+    // own group-writable mode on purpose.
+    ::umask(077);
 
     clt::App app(std::move(cfg));
 

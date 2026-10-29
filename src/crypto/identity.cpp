@@ -1,7 +1,6 @@
 #include "crypto/identity.h"
 
 #include <sodium.h>
-#include <sys/stat.h>
 
 #include <cstdio>
 #include <cerrno>
@@ -133,12 +132,7 @@ bool LocalIdentity::save(const std::string& path) const {
         LOG_ERROR("identity: close of %s failed", tmp.c_str());
         return false;
     }
-    // The private key must never be group- or world-readable.
-    if (chmod(tmp.c_str(), S_IRUSR | S_IWUSR) != 0) {
-        LOG_ERROR("identity: cannot chmod %s", tmp.c_str());
-        ::remove(tmp.c_str());
-        return false;
-    }
+    // durable_replace() makes it 0600, and refuses to install it otherwise.
     std::string error;
     if (!durable_replace(tmp, path, error)) {
         LOG_ERROR("identity: %s", error.c_str());

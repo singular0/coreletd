@@ -43,7 +43,7 @@ public:
 
 private:
     bool load_or_create_identity();
-    bool ensure_state_dir();
+    bool check_state_dir();
     std::unique_ptr<radio::Radio> make_radio(std::string& error);
     void log_status();
 

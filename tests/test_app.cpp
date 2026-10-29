@@ -7,6 +7,7 @@
 
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -58,7 +59,7 @@ Config harness_config(const std::string& state_dir) {
 // the key beforehand also puts startup on the load-an-existing-key path.
 bool install_identity(const Config& cfg, std::string_view priv) {
     auto id = crypto::LocalIdentity::from_bytes(from_hex(priv));
-    return id && id->save(cfg.identity_path);
+    return id && id->save(cfg.identity_path());
 }
 
 // Lets the daemon run over `ms` of virtual time. run() rather than
@@ -192,7 +193,7 @@ static void test_received_text_is_acked_on_air() {
     const std::string dir = fresh_state_dir("ack");
     Config cfg = harness_config(dir);
     CHECK(install_identity(cfg, pv::kPrivB));
-    const std::string contacts_path = cfg.contacts_path;
+    const std::string contacts_path = cfg.contacts_path();
 
     ManualClock clock;
     auto radio = std::make_unique<GatedRadio>();
@@ -416,7 +417,7 @@ static void test_corrupt_contacts_are_kept_not_overwritten() {
     const std::string dir = fresh_state_dir("corruptcontacts");
     Config cfg = harness_config(dir);
     CHECK(install_identity(cfg, pv::kPrivB));
-    const std::string contacts_path = cfg.contacts_path;
+    const std::string contacts_path = cfg.contacts_path();
 
     const std::string garbage = "# coreletd contacts v1\nnot a contact record at all\n";
     {
@@ -461,7 +462,7 @@ static void test_corrupt_contacts_recover_from_the_backup() {
     const std::string dir = fresh_state_dir("contactsbackup");
     Config cfg = harness_config(dir);
     CHECK(install_identity(cfg, pv::kPrivB));
-    const std::string contacts_path = cfg.contacts_path;
+    const std::string contacts_path = cfg.contacts_path();
     Config second = harness_config(dir);
 
     // A first run learns A from its advert and writes it out on the way down.
@@ -504,6 +505,117 @@ static void test_corrupt_contacts_recover_from_the_backup() {
     // byte, and a random one so two acks for the same message are not the same
     // packet.
     if (sent) check_bundled_ack(*sent, pv::kTextAckHash);
+    app.request_stop();
+}
+
+static unsigned mode_of(const std::string& path) {
+    struct stat st {};
+    if (::stat(path.c_str(), &st) != 0) return 0;
+    return st.st_mode & 07777;
+}
+
+// main() narrows the umask, but App is not main(), and a file's mode should not
+// depend on how the process was started. Under a umask that leaves everything
+// open, what the daemon writes still ends up its own: the key, the contacts it
+// learns and the messages it holds.
+static void test_state_is_private_whatever_the_umask() {
+    const mode_t old_umask = ::umask(0);
+    const std::string dir = fresh_state_dir("private");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const Config paths = cfg;
+
+    {
+        ManualClock clock;
+        auto radio = std::make_unique<GatedRadio>();
+        GatedRadio* air = radio.get();
+        App app(std::move(cfg), std::move(radio), clock);
+        CHECK(app.start());
+        air->set_ready(true);
+        air->inject(from_hex(pv::kAdvertPacket));
+        air->inject(from_hex(pv::kTextPacket));
+        app.request_stop();
+    }
+    ::umask(old_umask);
+
+    CHECK_EQ(mode_of(paths.identity_path()), 0600u);
+    CHECK_EQ(mode_of(paths.contacts_path()), 0600u);
+    CHECK_EQ(mode_of(paths.messages_path()), 0600u);
+}
+
+// A state directory that is not there is a typo far more often than a first
+// run, and creating it would be a new node with nobody told.
+static void test_missing_state_dir_is_not_created() {
+    const std::string dir = fresh_state_dir("missing") + "/not-yet";
+    ManualClock clock;
+    App app(harness_config(dir), std::make_unique<GatedRadio>(), clock);
+    CHECK(!app.start());
+    CHECK(!std::filesystem::exists(dir));
+}
+
+// Contacts without a key are a node whose key went missing, not a first run.
+// Minting a new one would make this a stranger to everyone the contacts name,
+// so startup stops and leaves the directory as it found it.
+static void test_lost_identity_is_not_replaced() {
+    const std::string dir = fresh_state_dir("lostkey");
+    Config cfg = harness_config(dir);
+    {
+        mesh::ChannelStore channels(cfg.channels_path());
+        channels.set(1, mesh::Channel::from_hashtag("#private"));
+        CHECK(channels.save());
+    }
+    const std::string identity_path = cfg.identity_path();
+
+    {
+        ManualClock clock;
+        App app(std::move(cfg), std::make_unique<GatedRadio>(), clock);
+        CHECK(!app.start());
+    }
+    CHECK(!std::filesystem::exists(identity_path));
+
+    // With nothing else there, the same directory is a first run.
+    std::filesystem::remove(harness_config(dir).channels_path());
+    ManualClock clock;
+    App app(harness_config(dir), std::make_unique<GatedRadio>(), clock);
+    CHECK(app.start());
+    CHECK(std::filesystem::exists(identity_path));
+    app.request_stop();
+}
+
+// Before every save was restricted, contacts and channels were written under
+// the umask, and a restored backup is whatever the copy made it. Startup closes
+// those rather than waiting for a save, which a channel list nobody edits may
+// never get — and the backup beside it is the same secrets.
+static void test_open_state_is_restricted_at_startup() {
+    const std::string dir = fresh_state_dir("openstate");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    {
+        mesh::ChannelStore channels(cfg.channels_path());
+        channels.set(1, mesh::Channel::from_hashtag("#private"));
+        CHECK(channels.save());
+        CHECK(channels.save());  // the second leaves the first as the backup
+    }
+    std::ofstream(cfg.contacts_path() + ".tmp") << "# coreletd contacts v1\n";
+    for (const std::string& path :
+         {cfg.identity_path(), cfg.channels_path(), cfg.channels_path() + ".bak",
+          cfg.contacts_path() + ".tmp"}) {
+        CHECK(::chmod(path.c_str(), 0644) == 0);
+    }
+    CHECK(::chmod(dir.c_str(), 0755) == 0);
+    const Config paths = cfg;
+
+    ManualClock clock;
+    App app(std::move(cfg), std::make_unique<GatedRadio>(), clock);
+    CHECK(app.start());
+
+    CHECK_EQ(mode_of(paths.identity_path()), 0600u);
+    CHECK_EQ(mode_of(paths.channels_path()), 0600u);
+    CHECK_EQ(mode_of(paths.channels_path() + ".bak"), 0600u);
+    CHECK_EQ(mode_of(paths.contacts_path() + ".tmp"), 0600u);
+    // The directory is the operator's to name, and possibly shared, so it is
+    // warned about rather than changed.
+    CHECK_EQ(mode_of(dir), 0755u);
     app.request_stop();
 }
 
@@ -639,6 +751,10 @@ int main() {
     test_message_path_len_is_meshcores_way_round();
     test_corrupt_contacts_are_kept_not_overwritten();
     test_corrupt_contacts_recover_from_the_backup();
+    test_state_is_private_whatever_the_umask();
+    test_open_state_is_restricted_at_startup();
+    test_missing_state_dir_is_not_created();
+    test_lost_identity_is_not_replaced();
     test_companion_app_round_trip();
     test_pushes_wait_for_app_start();
 

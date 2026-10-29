@@ -66,7 +66,8 @@ Edit the file and restart.
 - [x] Survives the radio disappearing: if the AIO v2's LoRa power rail is off, the daemon starts
       anyway, waits for the chip, and picks it up when it appears. The same check reconnects if the
       rail is cut mid-session.
-- [x] Crash-durable state — contacts, channels and your identity are written atomically.
+- [x] Crash-durable, private state — contacts, channels and your identity are written atomically,
+      and only the daemon's own user can read them.
 - [x] A Debian package with a systemd unit and udev rules.
 
 ### Tested against real hardware
@@ -201,6 +202,10 @@ answer it — `869.618` for EU868, `910.525` for US915. Every node on a mesh mus
 `lora_bw` and `lora_sf`; the shipped values are MeshCore's standard settings. `lora_cr` is carried in
 each packet's header, so it only costs airtime rather than breaking the link.
 
+`state_dir` in `[storage]` is the other setting with no default, but the shipped file already names
+`/var/lib/coreletd`, the directory systemd creates for the service. Leave it unless you run the
+daemon some other way; it must be an absolute path to a directory that exists.
+
 Worth setting while you are in there: `advert_name` in `[node]` (what other nodes see), `lat` / `lon`
 if you want to publish a position, and `duty_cycle` in `[radio]` for your band. The file documents
 every option.
@@ -217,9 +222,9 @@ daemons cannot share the radio:
 
 ```sh
 sudo systemctl stop coreletd
+sudo install -d -o coreletd -g coreletd -m 0700 /var/lib/coreletd
 sudo install -d -o coreletd -g coreletd -m 0750 /run/coreletd
-sudo -u coreletd env HOME=/var/lib/coreletd \
-  /usr/sbin/coreletd --config /etc/coreletd/coreletd.ini --verbose
+sudo -u coreletd /usr/sbin/coreletd --config /etc/coreletd/coreletd.ini --verbose
 ```
 
 The default companion endpoint is `/run/coreletd/companion.sock`. It is owned by
@@ -267,6 +272,34 @@ On first start the daemon generates an Ed25519 key and writes it to `/var/lib/co
 contact you have sees you as a stranger, and your old identity lingers in their contact list as a
 node that never speaks again. Purging the package leaves the file in place for exactly this reason.
 
+A key that goes missing is not replaced: if the node's other files are still there, the daemon
+refuses to start rather than generate a new identity on top of them. Restore the key, or move the
+rest of the directory aside if a new node is what you want.
+
+### Back up and restore
+
+Everything the node is lives in `/var/lib/coreletd`: `identity`, `contacts`, `channels`, and the
+`messages` waiting for an app. Each file is replaced atomically, so a copy taken while the daemon
+runs is never half-written — though it can trail by a second for anything you just changed, and by
+a minute for when contacts were last heard:
+
+```sh
+sudo tar -C /var/lib -czf coreletd-backup.tar.gz coreletd
+```
+
+The archive holds your private key and channel secrets, so keep it where only you can read it.
+
+To restore, stop the daemon first — a running one writes what it holds in memory over the restored
+files at its next save — and make sure the files end up owned by `coreletd`. Files left owned by
+root are unreadable to it, and it refuses to start rather than replace a key it cannot read:
+
+```sh
+sudo systemctl stop coreletd
+sudo tar -C /var/lib -xzf coreletd-backup.tar.gz
+sudo chown -R coreletd:coreletd /var/lib/coreletd
+sudo systemctl start coreletd
+```
+
 ## Security
 
 The companion protocol has **no authentication of any kind**. The default Unix socket limits access
@@ -279,6 +312,10 @@ loopback and reaching it over an SSH tunnel or WireGuard instead of widening `co
 ```sh
 ssh -L 5000:127.0.0.1:5000 uconsole.local
 ```
+
+The node's state is private to the `coreletd` user: `/var/lib/coreletd` is `0700` and every file
+in it `0600` — the identity, the channel secrets, your contacts, and messages waiting for an app.
+Joining the `coreletd` group grants the socket and the radio, not these; read them with `sudo`.
 
 ## Troubleshooting
 

@@ -780,7 +780,9 @@ class Harness:
         c = self.report.check
 
         self.clear_strays()
-        self.ssh.check(f"mkdir -p {self.state}")
+        # The daemon never creates its state directory, and warns about one
+        # other users can open.
+        self.ssh.check(f"mkdir -p {self.state} && chmod 700 {self.state}")
         if not self.a.keep_state:
             # Contacts and channels go, so every assertion below is about
             # something this run did. The identity stays: a node that mints a

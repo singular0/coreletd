@@ -99,16 +99,30 @@ and the radio is brought back when power returns.
 .I /etc/coreletd/coreletd.ini
 Configuration file.
 .TP
+.I /var/lib/coreletd
+The state directory, named by
+.B state_dir
+in
+.BR [storage] .
+It is required, must be an absolute path, and must already exist: the systemd
+unit creates this one. The files below live in it under fixed names, so a copy
+of it is a complete backup; restore one only while the daemon is stopped.
+.TP
 .I /var/lib/coreletd/identity
 The node's Ed25519 signing key, generated on first start, mode 0600. This file
 .I is
 the node: back it up. Deleting it yields a new public key, and every contact
-will see the node as a stranger.
+will see the node as a stranger. If it is missing while the other files are
+present, the daemon refuses to start rather than generate a new one.
 .TP
 .I /var/lib/coreletd/contacts
 .TQ
 .I /var/lib/coreletd/channels
-Learned contacts and configured channels.
+.TQ
+.I /var/lib/coreletd/messages
+Learned contacts, configured channels with their secrets, and received messages
+waiting for an app. Like the identity, each is mode 0600 in a directory of mode
+0700: the service group grants the socket, not the state.
 .TP
 .I /run/coreletd/companion.sock
 Default companion endpoint, owned by the service user and group with mode 0660.

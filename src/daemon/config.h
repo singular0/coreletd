@@ -34,11 +34,13 @@ struct Config {
     LogLevel log_level = LogLevel::Info;
     bool log_syslog_style = false;
 
+    // Required, absolute, and must already exist. Everything the node is lives
+    // in it under fixed names, so the directory is the whole of a backup.
     std::string state_dir;
-    std::string identity_path;
-    std::string contacts_path;
-    std::string channels_path;
-    std::string messages_path;
+    std::string identity_path() const { return state_dir + "/identity"; }
+    std::string contacts_path() const { return state_dir + "/contacts"; }
+    std::string channels_path() const { return state_dir + "/channels"; }
+    std::string messages_path() const { return state_dir + "/messages"; }
 
     radio::RadioParams radio;
     SpiConfig spi;
@@ -55,7 +57,7 @@ struct Config {
     // tests use it to hold the shipped coreletd.ini to the same key set.
     static std::vector<std::string_view> keys();
 
-    // Fills in state paths from state_dir when they were not set explicitly.
+    // Hands the subsystems the paths they own, once state_dir is final.
     void finalise();
 };
 

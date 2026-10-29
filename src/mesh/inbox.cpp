@@ -1,7 +1,5 @@
 #include "mesh/inbox.h"
 
-#include <sys/stat.h>
-
 #include <fstream>
 #include <limits>
 #include <string_view>
@@ -56,12 +54,6 @@ bool MessageInbox::save() {
     if (!out) {
         LOG_ERROR("messages: cannot write %s", tmp.c_str());
         return false;
-    }
-
-    // Unlike contacts, this file holds what people wrote, so it is not left
-    // world-readable for whoever else shares the machine.
-    if (::chmod(tmp.c_str(), S_IRUSR | S_IWUSR) != 0) {
-        LOG_WARN("messages: cannot restrict permissions on %s", tmp.c_str());
     }
 
     out << kHeader << '\n';

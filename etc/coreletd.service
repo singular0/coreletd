@@ -14,12 +14,13 @@ RestartSec=5
 User=coreletd
 Group=coreletd
 
-# systemd creates and owns this before start, so it need not be pre-made.
+# systemd creates and owns this before start, so it need not be pre-made. It
+# holds the node's private key and channel secrets; the group is for the socket
+# under /run, not for this, and systemd re-applies the mode on every start.
 StateDirectory=coreletd
-StateDirectoryMode=0750
+StateDirectoryMode=0700
 RuntimeDirectory=coreletd
 RuntimeDirectoryMode=0750
-Environment=HOME=/var/lib/coreletd
 
 # The daemon needs nothing beyond its own state, SPI and GPIO.
 NoNewPrivileges=yes

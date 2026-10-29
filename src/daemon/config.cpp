@@ -1,8 +1,5 @@
 #include "daemon/config.h"
 
-#include <pwd.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -16,18 +13,6 @@
 namespace clt {
 
 namespace {
-
-std::string default_state_dir() {
-    // Running as a system service: use the systemd StateDirectory. Running as a
-    // user: fall back to the XDG data dir so no root is needed for a test run.
-    if (::geteuid() == 0) return "/var/lib/coreletd";
-
-    if (const char* xdg = ::getenv("XDG_DATA_HOME"); xdg && *xdg)
-        return std::string(xdg) + "/coreletd";
-    if (const char* home = ::getenv("HOME"); home && *home)
-        return std::string(home) + "/.local/share/coreletd";
-    return "./coreletd-state";
-}
 
 // --- constraints -----------------------------------------------------------
 // Integer settings need only a range, which the table states inline. These are
@@ -197,10 +182,6 @@ std::vector<Setting> settings(Config& cfg, Raw& raw) {
 
         // --- storage ---
         Str("storage.state_dir", cfg.state_dir),
-        Str("storage.identity_path", cfg.identity_path),
-        Str("storage.contacts_path", cfg.contacts_path),
-        Str("storage.channels_path", cfg.channels_path),
-        Str("storage.messages_path", cfg.messages_path),
 
         // --- logging ---
         Str("logging.log_level", raw.log_level),
@@ -257,10 +238,6 @@ bool Config::load(const std::string& path, std::string& error) {
     Ini ini;
     if (!ini.load(path, error)) return false;
 
-    // The one default that is discovered rather than declared — it depends on
-    // whether we are root — so it cannot sit beside the field in config.h.
-    if (state_dir.empty()) state_dir = default_state_dir();
-
     Raw raw;
     for (const Setting& s : settings(*this, raw))
         if (!apply(ini, s, error)) return false;
@@ -285,6 +262,20 @@ bool Config::load(const std::string& path, std::string& error) {
             "(e.g. 869.618 for EU868, 910.525 for US915)";
         return false;
     }
+
+    // No default, because every guess was a different node: root and everyone
+    // else used to land in different directories, and a relative path changes
+    // with whoever's working directory the daemon starts in.
+    if (state_dir.empty()) {
+        error = "storage.state_dir is required — the directory holding this node's identity, "
+                "contacts, channels and messages (/var/lib/coreletd for the packaged service)";
+        return false;
+    }
+    if (state_dir.front() != '/') {
+        error = "storage.state_dir must be an absolute path, not \"" + state_dir + "\"";
+        return false;
+    }
+    while (state_dir.size() > 1 && state_dir.back() == '/') state_dir.pop_back();
 
     // 0,0 is how the file says "no position", not a point in the Gulf of Guinea.
     node.has_location = raw.lat != 0.0 || raw.lon != 0.0;
@@ -335,13 +326,9 @@ std::vector<std::string_view> Config::keys() {
 }
 
 void Config::finalise() {
-    if (identity_path.empty()) identity_path = state_dir + "/identity";
-    if (contacts_path.empty()) contacts_path = state_dir + "/contacts";
-    if (channels_path.empty()) channels_path = state_dir + "/channels";
-    if (messages_path.empty()) messages_path = state_dir + "/messages";
     // The queue lives inside Node, so it is the node config that carries the
-    // path; storage.messages_path stays where an operator expects to find it.
-    node.messages_path = messages_path;
+    // path.
+    node.messages_path = messages_path();
 }
 
 }  // namespace clt

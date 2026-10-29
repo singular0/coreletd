@@ -1,7 +1,10 @@
 #include "daemon/app.h"
 
+#include <sys/stat.h>
+
+#include <cerrno>
 #include <cstdio>
-#include <filesystem>
+#include <cstring>
 
 #include "crypto/crypto.h"
 #include "util/clock.h"
@@ -54,25 +57,54 @@ mesh::LoadResult load_state(Store& store, const std::string& path, const char* w
     return result;
 }
 
+// Every save is written 0600, but a file restored from a backup, or left by an
+// older version, is restricted here rather than at its next save — which, for
+// a channel list nobody edits, may never come. The backup and the temporary a
+// crashed save leaves behind are copies of the same secrets.
+void restrict_state_files(const Config& cfg) {
+    for (const std::string& path :
+         {cfg.identity_path(), cfg.contacts_path(), cfg.channels_path(), cfg.messages_path()}) {
+        for (const char* suffix : {"", ".bak", ".tmp"}) restrict_to_owner(path + suffix);
+    }
+}
+
+bool exists(const std::string& path) {
+    struct stat st {};
+    return ::stat(path.c_str(), &st) == 0;
+}
+
 }  // namespace
 
-bool App::ensure_state_dir() {
-    std::error_code ec;
-    std::filesystem::create_directories(cfg_.state_dir, ec);
-    if (ec) {
-        LOG_ERROR("cannot create state directory %s: %s", cfg_.state_dir.c_str(),
-                  ec.message().c_str());
+// The directory is not created here. systemd's StateDirectory= makes it for the
+// service; anywhere else, a path that is not there is far more likely a typo
+// than a first run, and creating it would quietly start a new node.
+bool App::check_state_dir() {
+    struct stat st {};
+    if (::stat(cfg_.state_dir.c_str(), &st) != 0) {
+        LOG_ERROR("state directory %s: %s — create it, owned by the daemon's user and mode 0700",
+                  cfg_.state_dir.c_str(), std::strerror(errno));
         return false;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        LOG_ERROR("state directory %s is not a directory", cfg_.state_dir.c_str());
+        return false;
+    }
+    // Said rather than fixed: narrowing a directory is the operator's call. The
+    // files in it are restricted regardless, so what shows is their names, sizes
+    // and times rather than their contents.
+    if ((st.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
+        LOG_WARN("state directory %s is open to other users (mode %04o); chmod 700 it",
+                 cfg_.state_dir.c_str(), static_cast<unsigned>(st.st_mode & 07777));
     }
     return true;
 }
 
 bool App::load_or_create_identity() {
     std::string error;
-    if (auto id = crypto::LocalIdentity::load(cfg_.identity_path, error)) {
+    if (auto id = crypto::LocalIdentity::load(cfg_.identity_path(), error)) {
         identity_ = std::make_unique<crypto::LocalIdentity>(*id);
         LOG_INFO("identity: loaded %s from %s", hex_prefix(identity_->pub()).c_str(),
-                 cfg_.identity_path.c_str());
+                 cfg_.identity_path().c_str());
         return true;
     }
     if (!error.empty()) {
@@ -80,15 +112,28 @@ bool App::load_or_create_identity() {
         return false;
     }
 
-    // No key yet: this is a first run.
+    // No key, but a node has lived here: the key was lost — a partial restore,
+    // a stray rm — rather than never made. Minting one would start a stranger
+    // on top of that node's contacts and channels, and every peer that knew it
+    // would be left holding a contact that never speaks again.
+    for (const std::string& path :
+         {cfg_.contacts_path(), cfg_.channels_path(), cfg_.messages_path()}) {
+        if (!exists(path)) continue;
+        LOG_ERROR("identity: %s is missing but %s is not — restore the identity from a backup, "
+                  "or move the rest of %s aside to start a new node on purpose",
+                  cfg_.identity_path().c_str(), path.c_str(), cfg_.state_dir.c_str());
+        return false;
+    }
+
+    // No key and nothing else: this is a first run.
     identity_ = std::make_unique<crypto::LocalIdentity>(crypto::LocalIdentity::generate());
-    if (!identity_->save(cfg_.identity_path)) {
+    if (!identity_->save(cfg_.identity_path())) {
         LOG_ERROR("identity: generated a new key but could not save it — refusing to start "
                   "with an identity that would change on restart");
         return false;
     }
     LOG_INFO("identity: generated new node %s, saved to %s", hex(identity_->pub()).c_str(),
-             cfg_.identity_path.c_str());
+             cfg_.identity_path().c_str());
     return true;
 }
 
@@ -113,15 +158,16 @@ std::unique_ptr<radio::Radio> App::make_radio(std::string& error) {
 
 bool App::start() {
     if (!crypto::init()) return false;
-    if (!ensure_state_dir()) return false;
+    if (!check_state_dir()) return false;
+    restrict_state_files(cfg_);
     if (!load_or_create_identity()) return false;
 
-    contacts_ = std::make_unique<mesh::ContactStore>(*identity_, cfg_.contacts_path);
-    if (load_state(*contacts_, cfg_.contacts_path, "contacts") == mesh::LoadResult::Missing)
+    contacts_ = std::make_unique<mesh::ContactStore>(*identity_, cfg_.contacts_path());
+    if (load_state(*contacts_, cfg_.contacts_path(), "contacts") == mesh::LoadResult::Missing)
         LOG_INFO("contacts: starting with an empty store");
 
-    channels_ = std::make_unique<mesh::ChannelStore>(cfg_.channels_path);
-    if (load_state(*channels_, cfg_.channels_path, "channels") == mesh::LoadResult::Missing)
+    channels_ = std::make_unique<mesh::ChannelStore>(cfg_.channels_path());
+    if (load_state(*channels_, cfg_.channels_path(), "channels") == mesh::LoadResult::Missing)
         LOG_INFO("channels: using defaults (slot 0 = Public)");
 
     std::string error;
@@ -143,7 +189,7 @@ bool App::start() {
                                          cfg_.node);
     node_->start();
 
-    if (load_state(node_->inbox(), cfg_.messages_path, "messages") ==
+    if (load_state(node_->inbox(), cfg_.messages_path(), "messages") ==
         mesh::LoadResult::Loaded) {
         LOG_INFO("messages: recovered %zu waiting for an app", node_->inbox().size());
     }

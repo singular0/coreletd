@@ -193,10 +193,10 @@ coreletd will fail with `EBUSY`.
 sudoedit /etc/coreletd/coreletd.ini
 ```
 
-The file is divided into `[radio]`, `[hardware]`, `[node]`, `[companion]`, `[storage]`, and
-`[logging]` sections, and says how the daemon runs on this machine: the board's wiring, where apps
-connect, where the node's state lives, how much it logs. The shipped values fit a uConsole with an
-AIO v2, and the file documents every option.
+The file is divided into `[hardware]`, `[node]`, `[companion]`, `[storage]`, and `[logging]`
+sections, and says how the daemon runs on this machine: the board's wiring, where apps connect,
+where the node's state lives, how much it logs. The shipped values fit a uConsole with an AIO v2,
+and the file documents every option.
 
 `state_dir` in `[storage]` is the one setting with no default, but the shipped file already names
 `/var/lib/coreletd`, the directory systemd creates for the service. Leave it unless you run the

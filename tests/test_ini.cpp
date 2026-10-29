@@ -251,8 +251,6 @@ static void test_config_rejects_malformed_and_unsafe_values() {
     check_config_rejected("node.repeat = perhaps");
 
     // Narrow integer fields and timer multiplication cannot wrap.
-    check_config_rejected("radio.lora_preamble = 65536");
-    check_config_rejected("radio.lora_sync_word = 256");
     check_config_rejected("node.advert_interval = -1");
     check_config_rejected("node.advert_interval = 4294968");
     check_config_rejected("node.max_hops = -1");
@@ -361,8 +359,6 @@ static void test_config_accepts_valid_boundaries() {
                             "radio.lora_sf = 5",
                             "radio.lora_cr = 5",
                             "radio.lora_tx_power = -9",
-                            "radio.lora_preamble = 1",
-                            "radio.lora_sync_word = 255",
                             "radio.duty_cycle = 0.01",
                             "hardware.lora_tcxo = 0",
                             "hardware.current_limit = 157",
@@ -375,7 +371,6 @@ static void test_config_accepts_valid_boundaries() {
                             "companion.companion_port = 65535",
                         },
                         error));
-    CHECK_EQ(cfg.radio.preamble, uint16_t {1});
     CHECK_EQ(cfg.node.advert_interval_s, uint32_t {4294967});
     CHECK_EQ(cfg.node.max_hops, uint8_t {64});
     CHECK_EQ(cfg.companion.port, uint16_t {65535});

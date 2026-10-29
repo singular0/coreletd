@@ -147,7 +147,6 @@ constexpr std::string_view kAppKeys[] = {
 // the shipped coreletd.ini, which the tests check against this same list.
 std::vector<Setting> settings(Config& cfg, Raw& raw) {
     constexpr int64_t kMaxInt = std::numeric_limits<int>::max();
-    constexpr int64_t kMaxU8 = std::numeric_limits<uint8_t>::max();
     constexpr int64_t kMaxU16 = std::numeric_limits<uint16_t>::max();
     // The advert timer is armed in milliseconds in a uint32_t, so a longer
     // interval than this would wrap round to a near-immediate advert.
@@ -163,10 +162,6 @@ std::vector<Setting> settings(Config& cfg, Raw& raw) {
         Int("radio.lora_cr", cfg.radio.cr, 5, 8),
         Int("radio.lora_tx_power", cfg.radio.tx_power_dbm, radio::kMinTxPowerDbm,
             radio::kMaxTxPowerDbm),
-        // 0 is "derive it from the spreading factor", which is what MeshCore
-        // does; a value is an override for a mesh that agreed on another.
-        Int("radio.lora_preamble", cfg.radio.preamble, 0, kMaxU16),
-        Int("radio.lora_sync_word", cfg.radio.sync_word, 0, kMaxU8),
         Real("radio.duty_cycle", cfg.radio.duty_cycle_pct, valid_duty_cycle,
              "greater than 0 and less than 100 percent"),
 

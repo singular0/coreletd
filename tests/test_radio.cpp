@@ -121,14 +121,6 @@ static void test_preamble_follows_the_spreading_factor() {
     // The shipped default is SF8, so 32 is what the daemon transmits unasked.
     radio::RadioParams def;
     CHECK_EQ(def.preamble_symbols(), uint16_t {32});
-
-    // A configured value overrides the rule at every spreading factor: a mesh
-    // that agreed on something else has to be able to say so.
-    p.preamble = 8;
-    for (uint8_t sf = 5; sf <= 12; sf++) {
-        p.sf = sf;
-        CHECK_EQ(p.preamble_symbols(), uint16_t {8});
-    }
 }
 
 // The sync word and start frame delimiter are 4.25 symbols at SF7 and above and

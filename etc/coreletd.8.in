@@ -45,7 +45,6 @@ Print the version and exit.
 Print a usage summary and exit.
 .SH CONFIGURATION
 Settings are grouped into
-.BR [radio] ,
 .BR [hardware] ,
 .BR [node] ,
 .BR [companion] ,

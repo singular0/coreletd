@@ -73,6 +73,9 @@ constexpr size_t kMaxPayloadSize = 255;
 constexpr uint16_t kHeaderSymbols = 16;
 
 constexpr uint8_t kPacketTypeLoRa = 0x01;
+// RadioLib's "private network" sync word, which MeshCore passes to every radio
+// it drives and has no setting for: a node on any other hears nothing.
+constexpr uint8_t kSyncWord = 0x12;
 constexpr uint8_t kStandbyRc = 0x00;
 
 // An unpowered module leaves MISO at all-zeroes or all-ones. A real SX126x
@@ -617,10 +620,9 @@ bool Sx1262::configure(std::string& error) {
     if (!set_modulation()) return fail_with("SetModulationParams");
     if (!set_packet_params(0xFF)) return fail_with("SetPacketParams");
 
-    // MeshCore uses the "private network" sync word 0x12, which the SX126x
-    // stores nibble-expanded across two registers.
-    Bytes sync {static_cast<uint8_t>((params_.sync_word & 0xF0) | 0x04),
-                static_cast<uint8_t>(((params_.sync_word & 0x0F) << 4) | 0x04)};
+    // The SX126x stores the sync word nibble-expanded across two registers.
+    Bytes sync {static_cast<uint8_t>((kSyncWord & 0xF0) | 0x04),
+                static_cast<uint8_t>(((kSyncWord & 0x0F) << 4) | 0x04)};
     if (!write_register(kRegLoRaSyncWordMsb, sync)) return fail_with("sync word");
 
     uint8_t gain = params_.rx_boosted_gain ? 0x96 : 0x94;
@@ -986,10 +988,9 @@ void Sx1262::shutdown() {
 std::string Sx1262::describe() const {
     if (!params_.has_frequency())
         return vformat("SX1262 on %s, idle: no frequency set", pins_.spidev.c_str());
-    // The preamble is in here because it is the one air setting with no line in
-    // the config file to read it off: unset means derived from the spreading
-    // factor, so the log is the only place it is visible to compare against a
-    // neighbour's.
+    // The preamble is in here because it is the one air setting with no key to
+    // read it off: it follows the spreading factor, so the log is the only
+    // place it is visible to compare against a neighbour's.
     std::string s =
         vformat("SX1262 on %s (%.3f MHz, SF%u, BW %.1f kHz, CR 4/%u, %d dBm, %u-symbol preamble)",
                 pins_.spidev.c_str(), params_.freq_mhz, params_.sf, params_.bw_khz, params_.cr,

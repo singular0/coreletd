@@ -69,11 +69,6 @@ struct RadioParams {
     // it just costs airtime, here and on every repeater that forwards it.
     uint8_t cr = 5;
     int tx_power_dbm = 22;
-    uint8_t sync_word = 0x12;  // MeshCore uses the "private" LoRa sync word
-    // 0 means "whatever the spreading factor calls for", which is what a
-    // MeshCore neighbour uses; see preamble_symbols(). A configured value is an
-    // override for a mesh that has agreed on something else.
-    uint16_t preamble = 0;
     double tcxo_voltage = 1.8;  // 0 == module has no TCXO
     bool dio2_as_rf_switch = true;
     bool rx_boosted_gain = true;
@@ -98,12 +93,13 @@ struct RadioParams {
     }
 
     // Preamble length in symbols. MeshCore derives it from the spreading factor
-    // rather than fixing it (RadioLibWrapper::preambleLengthForSF), doubling it
-    // at SF8 and below where a longer preamble buys reliability. Both ends
-    // still decode a mismatch — the receiver only needs to catch enough of the
-    // preamble to sync — but transmitting 16 into a mesh that transmits 32 at
-    // our own default SF8 gives away half the sync margin our neighbours have.
-    uint16_t preamble_symbols() const { return preamble ? preamble : (sf <= 8 ? 32 : 16); }
+    // (RadioLibWrapper::preambleLengthForSF), doubling it at SF8 and below
+    // where a longer preamble buys reliability, and has no setting for it. Both
+    // ends still decode a mismatch — the receiver only needs to catch enough of
+    // the preamble to sync — but transmitting 16 into a mesh that transmits 32
+    // at our own default SF8 gives away half the sync margin our neighbours
+    // have.
+    uint16_t preamble_symbols() const { return sf <= 8 ? 32 : 16; }
 
     // Symbols between the preamble and the header: the sync word plus the start
     // frame delimiter. 4.25 at SF7 and above, 6.25 at SF5 and SF6, which the

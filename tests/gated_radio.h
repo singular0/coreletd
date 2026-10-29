@@ -15,6 +15,11 @@ namespace clt::test {
 
 class GatedRadio final : public radio::Radio {
 public:
+    // Tuned, as a radio is once an app names a frequency: nothing is
+    // transmitted without one. App hands the radio its config's parameters,
+    // so a test of the radio-silent first start takes it away there.
+    GatedRadio() { params_.freq_mhz = 869.618; }
+
     bool begin(EventLoop& loop, std::string&) override {
         loop_ = &loop;
         return true;
@@ -30,6 +35,10 @@ public:
     bool ready() const override { return ready_; }
     const radio::RadioParams& params() const override { return params_; }
     std::string describe() const override { return "gated test radio"; }
+    void reconfigure(const radio::RadioParams& params) override {
+        params_ = params;
+        reconfigure_count_++;
+    }
 
     void set_ready(bool ready) { ready_ = ready; }
     void complete_tx(uint32_t airtime_ms = 1) {
@@ -59,6 +68,7 @@ public:
 
     size_t send_count() const { return send_count_; }
     const Bytes& last_sent() const { return last_sent_; }
+    size_t reconfigure_count() const { return reconfigure_count_; }
 
 private:
     radio::RadioParams params_;
@@ -67,6 +77,7 @@ private:
     bool busy_ = false;
     bool channel_busy_ = false;
     size_t send_count_ = 0;
+    size_t reconfigure_count_ = 0;
     Bytes last_sent_;
 };
 

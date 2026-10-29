@@ -11,9 +11,8 @@
 using namespace clt;
 using namespace clt::test;
 
-// The two settings with no default, which every config meant to load carries.
-static const std::string kRequired =
-    "[storage]\nstate_dir = /var/lib/coreletd\n[radio]\nlora_freq = 869.618\n";
+// The one setting with no default, which every config meant to load carries.
+static const std::string kRequired = "[storage]\nstate_dir = /var/lib/coreletd\n";
 
 static std::string write_temp(const std::string& body) {
     std::string path = "/tmp/coreletd_test_ini.ini";
@@ -208,19 +207,40 @@ static std::string as_sectioned_setting(const std::string& setting) {
     return "[" + setting.substr(0, dot) + "]\n" + setting.substr(dot + 1) + "\n";
 }
 
+// Each "section.key = value" where it lives: a key of the config file's on a
+// line of it, and an app key through set(), as the settings file applies one
+// over the defaults. Then validate(), as App takes the result — once it has
+// named the node after its key, which this stands in for.
+static bool load_settings(Config& cfg, const std::vector<std::string>& settings,
+                          std::string& error) {
+    std::string body = kRequired;
+    std::vector<std::pair<std::string, std::string>> app;
+    for (const std::string& setting : settings) {
+        const size_t eq = setting.find(" =");
+        const std::string key = setting.substr(0, eq);
+        if (Config::app_key(key))
+            app.emplace_back(key, setting.substr(std::min(eq + 3, setting.size())));
+        else
+            body += as_sectioned_setting(setting);
+    }
+    if (!cfg.load(write_temp(body), error)) return false;
+    cfg.node.name = "4FD099CC";
+    for (const auto& [key, value] : app)
+        if (!cfg.set(key, value, error)) return false;
+    return cfg.validate(error);
+}
+
 static void check_config_rejected(const std::string& setting) {
-    std::string path = write_temp(kRequired + as_sectioned_setting(setting));
     Config cfg;
     std::string error;
-    CHECK(!cfg.load(path, error));
+    CHECK(!load_settings(cfg, {setting}, error));
     CHECK(!error.empty());
 }
 
 static void check_config_accepted(const std::string& setting) {
-    std::string path = write_temp(kRequired + as_sectioned_setting(setting));
     Config cfg;
     std::string error;
-    CHECK(cfg.load(path, error));
+    CHECK(load_settings(cfg, {setting}, error));
 }
 
 static void test_config_rejects_malformed_and_unsafe_values() {
@@ -252,9 +272,11 @@ static void test_config_rejects_malformed_and_unsafe_values() {
     check_config_rejected("hardware.spi_speed = 16000001");
 
     // Duty-cycle enforcement must never be disabled by an invalid percentage.
+    // 100 is valid, and is no limit: an airtime factor of 0.
     check_config_rejected("radio.duty_cycle = 0");
-    check_config_rejected("radio.duty_cycle = 100");
+    check_config_rejected("radio.duty_cycle = 100.1");
     check_config_rejected("radio.duty_cycle = nan");
+    check_config_accepted("radio.duty_cycle = 100");
 
     check_config_rejected("node.lat = -90.1");
     check_config_rejected("node.lat = nan");
@@ -272,31 +294,44 @@ static void test_advert_name_must_fit_the_advert() {
 
     // With lat/lon the eight bytes they cost come out of the same budget.
     auto with_location = [](size_t name_len) {
-        return kRequired + "[node]\nlat = 51.5\nlon = -0.1\nadvert_name = " +
-               std::string(name_len, 'x') + "\n";
+        return std::vector<std::string> {"node.lat = 51.5", "node.lon = -0.1",
+                                         "node.advert_name = " + std::string(name_len, 'x')};
     };
     {
-        std::string path = write_temp(with_location(24));
         Config cfg;
         std::string error;
-        CHECK(!cfg.load(path, error));
+        CHECK(!load_settings(cfg, with_location(24), error));
     }
     {
-        std::string path = write_temp(with_location(23));
         Config cfg;
         std::string error;
-        CHECK(cfg.load(path, error));
+        CHECK(load_settings(cfg, with_location(23), error));
     }
 
     // An empty value is not a way to end up nameless: the ini falls back to the
     // default. Worth pinning, because a nameless node is invisible to chat
     // clients even when its signature verifies.
     {
-        std::string path = write_temp(kRequired + "[node]\nadvert_name =\n");
         Config cfg;
         std::string error;
-        CHECK(cfg.load(path, error));
-        CHECK(!cfg.node.name.empty());
+        CHECK(load_settings(cfg, {"node.advert_name ="}, error));
+        CHECK(cfg.node.name == "4FD099CC");
+    }
+    // And the default is no name at all until App derives one from the key,
+    // so a Config it has not named is refused.
+    {
+        Config cfg;
+        std::string error;
+        CHECK(!cfg.validate(error));
+    }
+
+    // Only an app can send a control character, and a line break would end
+    // the value in the settings file.
+    {
+        Config cfg;
+        cfg.node.name = "two\nlines";
+        std::string error;
+        CHECK(!cfg.validate(error));
     }
 }
 
@@ -317,33 +352,29 @@ static void test_maximal_appdata_fits_what_meshcore_verifies() {
 }
 
 static void test_config_accepts_valid_boundaries() {
-    std::string path = write_temp(
-        "[storage]\n"
-        "state_dir = /var/lib/coreletd\n"
-        "[radio]\n"
-        "lora_freq = 150\n"
-        "lora_bw = 7.81\n"
-        "lora_sf = 5\n"
-        "lora_cr = 5\n"
-        "lora_tx_power = -9\n"
-        "lora_preamble = 1\n"
-        "lora_sync_word = 255\n"
-        "duty_cycle = 0.01\n"
-        "[hardware]\n"
-        "lora_tcxo = 0\n"
-        "current_limit = 157\n"
-        "spi_speed = 16000000\n"
-        "lora_retry_interval = 0\n"
-        "[node]\n"
-        "advert_interval = 4294967\n"
-        "max_hops = 64\n"
-        "lat = -90\n"
-        "lon = 180\n"
-        "[companion]\n"
-        "companion_port = 65535\n");
     Config cfg;
     std::string error;
-    CHECK(cfg.load(path, error));
+    CHECK(load_settings(cfg,
+                        {
+                            "radio.lora_freq = 150",
+                            "radio.lora_bw = 7.81",
+                            "radio.lora_sf = 5",
+                            "radio.lora_cr = 5",
+                            "radio.lora_tx_power = -9",
+                            "radio.lora_preamble = 1",
+                            "radio.lora_sync_word = 255",
+                            "radio.duty_cycle = 0.01",
+                            "hardware.lora_tcxo = 0",
+                            "hardware.current_limit = 157",
+                            "hardware.spi_speed = 16000000",
+                            "hardware.lora_retry_interval = 0",
+                            "node.advert_interval = 4294967",
+                            "node.max_hops = 64",
+                            "node.lat = -90",
+                            "node.lon = 180",
+                            "companion.companion_port = 65535",
+                        },
+                        error));
     CHECK_EQ(cfg.radio.preamble, uint16_t {1});
     CHECK_EQ(cfg.node.advert_interval_s, uint32_t {4294967});
     CHECK_EQ(cfg.node.max_hops, uint8_t {64});
@@ -352,37 +383,123 @@ static void test_config_accepts_valid_boundaries() {
     CHECK_EQ(cfg.node.lon_e6, int32_t {180000000});
 }
 
+// A setting above its section header is a different key, and is not read as
+// the one in the section: the state directory below is still missing.
 static void test_config_requires_sections() {
-    std::string path =
-        write_temp("lora_freq = 869.618\n[storage]\nstate_dir = /var/lib/coreletd\n");
+    std::string path = write_temp("state_dir = /var/lib/coreletd\n[storage]\n");
     Config cfg;
     std::string error;
     CHECK(!cfg.load(path, error));
-    CHECK(error.find("radio.lora_freq") != std::string::npos);
+    CHECK(error.find("storage.state_dir") != std::string::npos);
     std::remove(path.c_str());
+}
+
+// What an app may change has one owner, the settings file. The config file
+// does not even parse those keys, so a value there is neither applied nor
+// refused, and the radio stays idle until an app names a frequency.
+static void test_app_keys_stay_out_of_the_config_file() {
+    std::string path = write_temp(kRequired +
+                                  "[radio]\nlora_freq = 869.618\nlora_sf = 99\n"
+                                  "[node]\nadvert_name = Operator\nadvert_interval = 60\n");
+    Config cfg;
+    std::string error;
+    CHECK(cfg.load(path, error));
+    CHECK(!cfg.radio.has_frequency());
+    CHECK_EQ(cfg.radio.sf, Config().radio.sf);
+    CHECK(cfg.node.name == Config().node.name);
+    // The rest of the file is read as ever.
+    CHECK_EQ(cfg.node.advert_interval_s, uint32_t {60});
+    std::remove(path.c_str());
+}
+
+// The settings file writes what get() spells and set() reads it back at the
+// next start, so each has to survive the trip unchanged, without the binary
+// noise of the double behind it.
+static void test_app_keys_round_trip() {
+    Config cfg;
+    std::string error;
+    auto round_trip = [&](std::string_view key, const std::string& text) {
+        bool ok = cfg.set(key, text, error);
+        CHECK(ok);
+        if (!ok) fprintf(stderr, "     %s\n", error.c_str());
+        const std::string back = cfg.get(key);
+        if (back != text) fprintf(stderr, "     %.*s: \"%s\" came back as \"%s\"\n",
+                                  static_cast<int>(key.size()), key.data(), text.c_str(),
+                                  back.c_str());
+        CHECK(back == text);
+    };
+    round_trip("radio.lora_freq", "869.618");
+    round_trip("radio.lora_freq", "869.525");
+    round_trip("radio.lora_bw", "7.81");
+    round_trip("radio.lora_bw", "62.5");
+    round_trip("radio.lora_sf", "11");
+    round_trip("radio.lora_cr", "5");
+    round_trip("radio.lora_tx_power", "-9");
+    round_trip("radio.duty_cycle", "100");
+    round_trip("radio.duty_cycle", "33.333333333333336");
+    round_trip("node.lat", "51.5074");
+    round_trip("node.lon", "-0.1278");
+    round_trip("node.repeat", "1");
+    round_trip("node.advert_name", "Field unit #2");
+
+    // Degrees land in the millionths the advert carries, and 0,0 is no
+    // position at all.
+    CHECK_EQ(cfg.node.lat_e6, int32_t {51507400});
+    CHECK_EQ(cfg.node.lon_e6, int32_t {-127800});
+    CHECK(cfg.node.has_location());
+    CHECK(cfg.set("node.lat", "0", error) && cfg.set("node.lon", "0", error));
+    CHECK(!cfg.node.has_location());
+
+    // The checks are the settings file's own, so an app gets no wider a range
+    // than a hand edit.
+    CHECK(!cfg.set("radio.lora_sf", "13", error));
+    CHECK(!cfg.set("radio.lora_tx_power", "23", error));
+    CHECK(!cfg.set("radio.lora_bw", "100", error));
+    CHECK(!cfg.set("node.lat", "90.5", error));
+    CHECK(!cfg.set("radio.duty_cycle", "0", error));
+    CHECK_EQ(cfg.radio.sf, uint8_t {11});
+
+    // And only the keys an app may change are open to it.
+    CHECK(!cfg.set("storage.state_dir", "/tmp", error));
+    CHECK(!cfg.set("hardware.lora_tcxo", "3.3", error));
+    CHECK(cfg.get("storage.state_dir").empty());
+}
+
+// Every app key is a row of the table, whose default reads back through it,
+// and none is the config file's as well.
+static void test_app_keys_are_settings() {
+    std::vector<std::string_view> config_keys = Config::keys();
+    for (std::string_view key : Config::app_keys()) {
+        CHECK(std::find(config_keys.begin(), config_keys.end(), key) == config_keys.end());
+        Config defaults;
+        std::string error;
+        CHECK(defaults.set(key, defaults.get(key), error));
+    }
+    CHECK(Config::app_key("node.advert_name"));
+    CHECK(!Config::app_key("node.advert_interval"));
 }
 
 // No default and no relative paths: either would make which node starts depend
 // on who started it, and from where.
 static void test_state_dir_is_required_and_absolute() {
-    std::string path = write_temp("[radio]\nlora_freq = 869.618\n");
+    std::string path = write_temp("[logging]\nlog_level = info\n");
     Config missing;
     std::string error;
     CHECK(!missing.load(path, error));
     CHECK(error.find("storage.state_dir") != std::string::npos);
 
-    path = write_temp("[storage]\nstate_dir = coreletd\n[radio]\nlora_freq = 869.618\n");
+    path = write_temp("[storage]\nstate_dir = coreletd\n");
     Config relative;
     error.clear();
     CHECK(!relative.load(path, error));
     CHECK(error.find("absolute") != std::string::npos);
 
-    path = write_temp("[storage]\nstate_dir = ~/coreletd\n[radio]\nlora_freq = 869.618\n");
+    path = write_temp("[storage]\nstate_dir = ~/coreletd\n");
     Config tilde;
     CHECK(!tilde.load(path, error));
 
     // The state files sit inside it under fixed names, however it was spelled.
-    path = write_temp("[storage]\nstate_dir = /srv/node/\n[radio]\nlora_freq = 869.618\n");
+    path = write_temp("[storage]\nstate_dir = /srv/node/\n");
     Config cfg;
     CHECK(cfg.load(path, error));
     cfg.finalise();
@@ -430,8 +547,8 @@ static std::vector<std::string> shipped_ini_keys() {
 }
 
 static void test_shipped_ini_matches_the_settings_table() {
-    // etc/coreletd.ini is the only documentation of what the daemon reads, so
-    // it and Config's settings table have to name the same keys: one that is
+    // etc/coreletd.ini is the only documentation of what the config file
+    // takes, so it and Config's settings table have to name the same keys: one that is
     // only in the table is undocumented, one that is only in the file is a
     // setting the daemon would warn about as unknown and then ignore.
     std::vector<std::string> documented = shipped_ini_keys();
@@ -466,6 +583,9 @@ int main() {
     test_maximal_appdata_fits_what_meshcore_verifies();
     test_config_accepts_valid_boundaries();
     test_config_requires_sections();
+    test_app_keys_stay_out_of_the_config_file();
+    test_app_keys_round_trip();
+    test_app_keys_are_settings();
     test_state_dir_is_required_and_absolute();
     test_shipped_ini_matches_the_settings_table();
     return finish("ini");

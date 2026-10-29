@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "companion/frames.h"
@@ -46,9 +47,12 @@ std::string fresh_state_dir(const char* name) {
     return dir;
 }
 
+// A node an app has tuned already, since nothing transmits without a
+// frequency. The app keys set here stand where the code's defaults would.
 Config harness_config(const std::string& state_dir) {
     Config cfg;
     cfg.state_dir = state_dir;
+    cfg.radio.freq_mhz = 869.618;
     cfg.companion.socket_path = state_dir + "/companion.sock";
     cfg.finalise();
     return cfg;
@@ -124,6 +128,26 @@ public:
         return {};
     }
 
+    // The answer to the last command. Replies are untagged, so it is the next
+    // frame that is not a push, whatever its code.
+    Bytes reply() {
+        for (int round = 0; round < 20; round++) {
+            drain(round == 0 ? 0 : 5);
+            for (;;) {
+                auto frame = reader_.next();
+                if (!frame) break;
+                if (!frame->empty() && (*frame)[0] < kPushAdvert) return *frame;
+            }
+            run_for(app_, 1);
+        }
+        return {};
+    }
+
+    Bytes command(const Bytes& payload) {
+        send(payload);
+        return reply();
+    }
+
     // The codes of whatever the daemon has written so far, in order. await()
     // waits for a frame to turn up and so cannot show that none did; this can.
     std::vector<uint8_t> drained() {
@@ -183,6 +207,101 @@ void check_bundled_ack(const proto::Packet& sent, std::string_view want_hash) {
     CHECK_EQ(ret->extra_type, static_cast<uint8_t>(proto::PayloadType::Ack));
     CHECK(ret->extra.size() >= 6);
     if (ret->extra.size() >= 4) CHECK_BYTES(subview(ret->extra, 0, 4), from_hex(want_hash));
+}
+
+// SELF_INFO, as an app reads it on connecting.
+struct SelfInfo {
+    uint8_t tx_power = 0;
+    uint8_t max_tx_power = 0;
+    int32_t lat_e6 = 0;
+    int32_t lon_e6 = 0;
+    uint32_t freq_khz = 0;
+    uint32_t bw_hz = 0;
+    uint8_t sf = 0;
+    uint8_t cr = 0;
+    std::string name;
+};
+
+std::optional<SelfInfo> self_info(Client& client) {
+    Bytes start {kCmdAppStart, 0, 0, 0, 0, 0, 0, 0};
+    put_str(start, "test");
+    client.send(start);
+    Bytes frame = client.await(kRespSelfInfo);
+    // code, adv_type, tx power, max tx power, key, lat, lon, four policy
+    // bytes, freq, bw, sf, cr, then the name.
+    Reader r(subview(frame, 1));
+    SelfInfo info;
+    r.skip(1);
+    info.tx_power = r.u8();
+    info.max_tx_power = r.u8();
+    r.skip(crypto::kPubKeySize);
+    info.lat_e6 = r.i32();
+    info.lon_e6 = r.i32();
+    r.skip(4);
+    info.freq_khz = r.u32();
+    info.bw_hz = r.u32();
+    info.sf = r.u8();
+    info.cr = r.u8();
+    if (!r.ok()) return std::nullopt;
+    info.name = to_string(r.rest());
+    return info;
+}
+
+// DEVICE_INFO's trailing bytes: MeshCore's v9 repeat flag and v10 path-hash
+// mode, past the 79 bytes of the version we claim.
+constexpr size_t kDeviceInfoRepeatAt = 80;
+
+int repeat_reported(Client& client) {
+    Bytes info = client.command(Bytes {kCmdDeviceQuery, 3});
+    CHECK_EQ(info.size(), kDeviceInfoRepeatAt + 2);
+    return info.size() > kDeviceInfoRepeatAt ? info[kDeviceInfoRepeatAt] : -1;
+}
+
+Bytes set_name(std::string_view name) {
+    Bytes out {kCmdSetAdvertName};
+    put_str(out, name);
+    return out;
+}
+
+Bytes set_latlon(int32_t lat_e6, int32_t lon_e6) {
+    Bytes out {kCmdSetAdvertLatLon};
+    put_i32(out, lat_e6);
+    put_i32(out, lon_e6);
+    put_i32(out, 0);  // altitude, which meshcore-cli sends and nothing reads
+    return out;
+}
+
+Bytes set_radio(uint32_t freq_khz, uint32_t bw_hz, uint8_t sf, uint8_t cr,
+                std::optional<uint8_t> repeat = std::nullopt) {
+    Bytes out {kCmdSetRadioParams};
+    put_u32(out, freq_khz);
+    put_u32(out, bw_hz);
+    out.push_back(sf);
+    out.push_back(cr);
+    if (repeat) out.push_back(*repeat);
+    return out;
+}
+
+Bytes set_tx_power(int8_t dbm) { return Bytes {kCmdSetRadioTxPower, static_cast<uint8_t>(dbm)}; }
+
+Bytes set_tuning(uint32_t rx_delay, uint32_t af_milli) {
+    Bytes out {kCmdSetTuningParams};
+    put_u32(out, rx_delay);
+    put_u32(out, af_milli);
+    return out;
+}
+
+const Bytes kOk {kRespOk};
+const Bytes kIllegalArg {kRespErr, kErrIllegalArg};
+
+// The name and position the advert on the air carries, which is what says the
+// node itself took a change rather than only the reply to it.
+std::optional<proto::AdvertAppData> advertised(const GatedRadio& air) {
+    auto p = proto::Packet::decode(air.last_sent());
+    if (!p || p->type != proto::PayloadType::Advert) return std::nullopt;
+    auto adv = proto::Advert::decode(p->payload);
+    if (!adv) return std::nullopt;
+    return proto::AdvertAppData::decode(adv->appdata);
 }
 
 }  // namespace
@@ -573,8 +692,10 @@ static void test_lost_identity_is_not_replaced() {
     }
     CHECK(!std::filesystem::exists(identity_path));
 
-    // With nothing else there, the same directory is a first run.
+    // With nothing else there, the same directory is a first run. Settings
+    // written by hand ahead of it are not a node that lived here.
     std::filesystem::remove(harness_config(dir).channels_path());
+    std::ofstream(harness_config(dir).settings_path()) << "[node]\nadvert_name = First\n";
     ManualClock clock;
     App app(harness_config(dir), std::make_unique<GatedRadio>(), clock);
     CHECK(app.start());
@@ -743,6 +864,336 @@ static void test_pushes_wait_for_app_start() {
     CHECK_BYTES(subview(logged, 3), from_hex(pv::kTextPacket));
 }
 
+// Each setter an app has, applied to the running node: the reply says OK, the
+// handshake reports the new value, and the node acts on it.
+static void test_app_changes_settings_live() {
+    const std::string dir = fresh_state_dir("settings");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string socket_path = cfg.companion.socket_path;
+
+    ManualClock clock;
+    auto radio = std::make_unique<GatedRadio>();
+    GatedRadio* air = radio.get();
+    App app(std::move(cfg), std::move(radio), clock);
+    CHECK(app.start());
+    air->set_ready(true);
+
+    Client client(app, socket_path);
+    CHECK(client.connected());
+    if (!client.connected()) return;
+
+    auto before = self_info(client);
+    CHECK(before.has_value());
+    if (!before) return;
+    // The SX1262's PA stops at 22 dBm, and an app builds its slider from this.
+    CHECK_EQ(before->max_tx_power, uint8_t {22});
+    CHECK_EQ(before->freq_khz, uint32_t {869618});
+    // Nobody has named the node, so it goes by its key, as a MeshCore one
+    // does: the first four bytes of kPubB.
+    CHECK(before->name == "4FD099CC");
+
+    CHECK_BYTES(client.command(set_name("Field unit")), kOk);
+    CHECK_BYTES(client.command(set_latlon(51507400, -127800)), kOk);
+    CHECK_BYTES(client.command(set_tx_power(10)), kOk);
+    CHECK_BYTES(client.command(set_radio(869525, 250000, 11, 5)), kOk);
+
+    auto after = self_info(client);
+    CHECK(after.has_value());
+    if (!after) return;
+    CHECK(after->name == "Field unit");
+    CHECK_EQ(after->lat_e6, int32_t {51507400});
+    CHECK_EQ(after->lon_e6, int32_t {-127800});
+    CHECK_EQ(after->tx_power, uint8_t {10});
+    CHECK_EQ(after->freq_khz, uint32_t {869525});
+    CHECK_EQ(after->bw_hz, uint32_t {250000});
+    CHECK_EQ(after->sf, uint8_t {11});
+    CHECK_EQ(after->cr, uint8_t {5});
+    // And the radio was handed them.
+    CHECK_EQ(air->params().tx_power_dbm, 10);
+    CHECK(air->params().freq_mhz == 869.525);
+    CHECK_EQ(air->params().sf, uint8_t {11});
+
+    // Nothing is advertised on a change, as MeshCore advertises nothing; the
+    // next advert carries it.
+    CHECK_EQ(air->send_count(), size_t {0});
+    CHECK_BYTES(client.command(Bytes {kCmdSendSelfAdvert, 1}), kOk);
+    CHECK_EQ(air->send_count(), size_t {1});
+    auto adv = advertised(*air);
+    CHECK(adv.has_value());
+    if (adv) {
+        CHECK(adv->name == "Field unit");
+        CHECK(adv->has_location());
+        CHECK_EQ(adv->lat_e6, int32_t {51507400});
+    }
+    air->complete_tx();
+
+    // Apps send whole hertz, so 7800 is the datasheet's 7.81 kHz; a bandwidth
+    // the chip does not have is refused rather than rounded to one it does.
+    CHECK_BYTES(client.command(set_radio(869525, 7800, 11, 5)), kOk);
+    CHECK(air->params().bw_khz == 7.81);
+    CHECK_BYTES(client.command(set_radio(869525, 100000, 11, 5)), kIllegalArg);
+    CHECK(air->params().bw_khz == 7.81);
+    // Out of the settings file's ranges is out of the app's.
+    CHECK_BYTES(client.command(set_radio(1200000, 250000, 11, 5)), kIllegalArg);
+    CHECK_BYTES(client.command(set_radio(0, 250000, 11, 5)), kIllegalArg);
+    CHECK_BYTES(client.command(set_radio(869525, 250000, 13, 5)), kIllegalArg);
+    CHECK_BYTES(client.command(set_tx_power(23)), kIllegalArg);
+    CHECK_BYTES(client.command(set_latlon(90000001, 0)), kIllegalArg);
+    CHECK_EQ(air->params().sf, uint8_t {11});
+
+    // The advert budget is enforced, never by cutting the name short: with a
+    // position set, 23 bytes fit and 24 do not.
+    CHECK_BYTES(client.command(set_name(std::string(24, 'x'))), kIllegalArg);
+    CHECK_BYTES(client.command(set_name(std::string(23, 'x'))), kOk);
+    // A position the shorter name fits beside, and not the longer one.
+    CHECK_BYTES(client.command(set_name(std::string(31, 'x'))), kIllegalArg);
+    CHECK_BYTES(client.command(set_latlon(0, 0)), kOk);
+    CHECK_BYTES(client.command(set_name(std::string(31, 'x'))), kOk);
+    CHECK_BYTES(client.command(set_latlon(51507400, -127800)), kIllegalArg);
+    CHECK_BYTES(client.command(set_name("")), kIllegalArg);
+
+    // The airtime factor is MeshCore's duty cycle: 100 / (1 + af).
+    CHECK_BYTES(client.command(set_tuning(0, 1000)), kOk);
+    CHECK(air->params().duty_cycle_pct == 50.0);
+    Bytes tuning = client.command(Bytes {kCmdGetTuningParams});
+    CHECK_EQ(tuning.size(), size_t {9});
+    if (tuning.size() == 9) {
+        Reader r(subview(tuning, 1));
+        CHECK_EQ(r.u32(), uint32_t {0});
+        CHECK_EQ(r.u32(), uint32_t {1000});
+    }
+    CHECK_BYTES(client.command(set_tuning(0, 0)), kOk);
+    CHECK(air->params().duty_cycle_pct == 100.0);
+    // 0-9, as MeshCore holds it; and no RX delay, which nothing here does.
+    CHECK_BYTES(client.command(set_tuning(0, 9001)), kIllegalArg);
+    CHECK_BYTES(client.command(set_tuning(500, 1000)), kIllegalArg);
+    CHECK(air->params().duty_cycle_pct == 100.0);
+
+    app.request_stop();
+}
+
+// What the app set is kept, and is what the next start runs on. An operator
+// with no app may write the file by hand, and that counts the same; but one
+// the daemon would not have written stops startup rather than be guessed
+// around, since the frequency is in it.
+static void test_settings_survive_a_restart() {
+    const std::string dir = fresh_state_dir("settingsrestart");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string socket_path = cfg.companion.socket_path;
+    const std::string settings_path = cfg.settings_path();
+
+    // False when the daemon would not start.
+    auto run = [&](auto&& body) {
+        ManualClock clock;
+        auto radio = std::make_unique<GatedRadio>();
+        GatedRadio* air = radio.get();
+        App app(harness_config(dir), std::move(radio), clock);
+        if (!app.start()) return false;
+        Client client(app, socket_path);
+        CHECK(client.connected());
+        if (client.connected()) body(client, *air);
+        app.request_stop();
+        return true;
+    };
+    auto write_settings = [&](const std::string& body) {
+        std::ofstream(settings_path, std::ios::trunc) << body;
+    };
+
+    CHECK(run([](Client& client, GatedRadio&) {
+        CHECK_BYTES(client.command(set_name("Renamed")), kOk);
+        CHECK_BYTES(client.command(set_tx_power(10)), kOk);
+    }));
+    // Written before the reply, and as private as the rest of the node.
+    CHECK(std::filesystem::exists(settings_path));
+    CHECK_EQ(mode_of(settings_path), 0600u);
+
+    // Both still stand, and the radio is given the TX power before anything
+    // is sent.
+    CHECK(run([](Client& client, GatedRadio& air) {
+        auto info = self_info(client);
+        CHECK(info && info->name == "Renamed");
+        CHECK(info && info->tx_power == 10);
+        CHECK_EQ(air.params().tx_power_dbm, 10);
+    }));
+
+    // By hand, with the daemon stopped. What the file leaves out is the
+    // default again.
+    write_settings("[node]\nadvert_name = \"By hand #1\"\n[radio]\nlora_sf = 9\n");
+    CHECK(run([](Client& client, GatedRadio& air) {
+        auto info = self_info(client);
+        CHECK(info && info->name == "By hand #1");
+        CHECK(info && info->tx_power == 22);
+        CHECK_EQ(air.params().sf, uint8_t {9});
+        // And the app's next change keeps the hand-written ones beside it.
+        CHECK_BYTES(client.command(set_tx_power(5)), kOk);
+    }));
+    CHECK(run([](Client& client, GatedRadio&) {
+        auto info = self_info(client);
+        CHECK(info && info->name == "By hand #1" && info->tx_power == 5 && info->sf == 9);
+    }));
+
+    // Out of range, a name the advert cannot carry beside the position, a
+    // line that is not a setting: each is refused, and the file left for the
+    // operator to put right.
+    for (const char* bad : {"[radio]\nlora_sf = 13\n",
+                            "[node]\nlat = 51.5\nlon = -0.1\nadvert_name = "
+                            "xxxxxxxxxxxxxxxxxxxxxxxx\n",
+                            "[radio]\nlora_sf\n"}) {
+        write_settings(bad);
+        CHECK(!run([](Client&, GatedRadio&) {}));
+        CHECK(std::filesystem::exists(settings_path));
+    }
+}
+
+// With the rail off, a radio setting is still a setting: kept, answered OK,
+// and handed to the radio for when it returns.
+static void test_settings_while_the_radio_is_absent() {
+    const std::string dir = fresh_state_dir("settingsabsent");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string socket_path = cfg.companion.socket_path;
+    const std::string settings_path = cfg.settings_path();
+
+    ManualClock clock;
+    auto radio = std::make_unique<GatedRadio>();
+    GatedRadio* air = radio.get();
+    App app(std::move(cfg), std::move(radio), clock);
+    CHECK(app.start());
+    // Never made ready: the rail is off.
+
+    Client client(app, socket_path);
+    CHECK(client.connected());
+    if (!client.connected()) return;
+
+    CHECK_BYTES(client.command(set_radio(869525, 62500, 9, 5)), kOk);
+    CHECK_EQ(air->params().sf, uint8_t {9});
+    CHECK(std::filesystem::exists(settings_path));
+
+    // It comes back, and the queue it held goes out on what it was given.
+    CHECK_BYTES(client.command(Bytes {kCmdSendSelfAdvert, 1}), kOk);
+    CHECK_EQ(air->send_count(), size_t {0});
+    air->set_ready(true);
+    app.loop().advance(1500);
+    CHECK_EQ(air->send_count(), size_t {1});
+    app.request_stop();
+}
+
+// No frequency is a first start, not a fault: the daemon comes up and
+// transmits nothing until an app names one.
+static void test_first_start_is_radio_silent() {
+    const std::string dir = fresh_state_dir("silent");
+    Config cfg = harness_config(dir);
+    cfg.radio.freq_mhz = 0;
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string socket_path = cfg.companion.socket_path;
+
+    ManualClock clock;
+    auto radio = std::make_unique<GatedRadio>();
+    GatedRadio* air = radio.get();
+    App app(std::move(cfg), std::move(radio), clock);
+    CHECK(app.start());
+    air->set_ready(true);
+    // The radio was handed the want of a frequency.
+    CHECK(!air->params().has_frequency());
+
+    Client client(app, socket_path);
+    CHECK(client.connected());
+    if (!client.connected()) return;
+
+    auto info = self_info(client);
+    CHECK(info && info->freq_khz == 0);
+
+    // Asked for, queued, and held: a ready radio is not a tuned one.
+    CHECK_BYTES(client.command(Bytes {kCmdSendSelfAdvert, 1}), kOk);
+    app.loop().advance(3000);
+    CHECK_EQ(air->send_count(), size_t {0});
+
+    // The app picks the preset, and what was waiting goes out on it.
+    CHECK_BYTES(client.command(set_radio(869618, 62500, 8, 5)), kOk);
+    CHECK_EQ(air->send_count(), size_t {1});
+    CHECK(air->params().freq_mhz == 869.618);
+    app.request_stop();
+}
+
+// The repeat byte is MeshCore's to the letter: absent means off, and an app
+// may turn it on only at the three frequencies MeshCore allows. DEVICE_INFO
+// reports it, since a client that means to keep it has to send it back.
+static void test_repeat_byte_and_frequency_list() {
+    const std::string dir = fresh_state_dir("repeat");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string socket_path = cfg.companion.socket_path;
+
+    {
+        ManualClock clock;
+        auto radio = std::make_unique<GatedRadio>();
+        GatedRadio* air = radio.get();
+        App app(std::move(cfg), std::move(radio), clock);
+        CHECK(app.start());
+        Client client(app, socket_path);
+        CHECK(client.connected());
+        if (!client.connected()) return;
+
+        CHECK_EQ(repeat_reported(client), 0);
+        CHECK_BYTES(client.command(set_radio(869618, 62500, 8, 5, 1)), kIllegalArg);
+        CHECK_EQ(repeat_reported(client), 0);
+        CHECK(air->params().freq_mhz == 869.618);
+
+        CHECK_BYTES(client.command(set_radio(869495, 250000, 11, 5, 1)), kOk);
+        CHECK_EQ(repeat_reported(client), 1);
+        // Repeat off is allowed anywhere, and is what a v3 client gets.
+        CHECK_BYTES(client.command(set_radio(869495, 250000, 11, 5)), kOk);
+        CHECK_EQ(repeat_reported(client), 0);
+        CHECK_BYTES(client.command(set_radio(918000, 250000, 11, 5, 1)), kOk);
+        CHECK_EQ(repeat_reported(client), 1);
+        app.request_stop();
+    }
+
+    // The list is a check on the app: repeat written into the settings file
+    // by hand is not held to it.
+    const std::string other = fresh_state_dir("repeathand");
+    Config operator_cfg = harness_config(other);
+    CHECK(install_identity(operator_cfg, pv::kPrivB));
+    std::ofstream(operator_cfg.settings_path()) << "[node]\nrepeat = 1\n";
+    ManualClock clock;
+    App app(std::move(operator_cfg), std::make_unique<GatedRadio>(), clock);
+    CHECK(app.start());
+    Client client(app, other + "/companion.sock");
+    CHECK(client.connected());
+    if (client.connected()) CHECK_EQ(repeat_reported(client), 1);
+    app.request_stop();
+}
+
+// The reply has to be true: a change that could not be written is refused,
+// and the node is left as it was rather than running on something a restart
+// would undo.
+static void test_unwritable_settings_are_refused() {
+    const std::string dir = fresh_state_dir("settingsio");
+    Config cfg = harness_config(dir);
+    CHECK(install_identity(cfg, pv::kPrivB));
+    const std::string socket_path = cfg.companion.socket_path;
+    // Nothing can be written over a directory, whoever the test runs as.
+    std::filesystem::create_directory(cfg.settings_path() + ".tmp");
+
+    ManualClock clock;
+    auto radio = std::make_unique<GatedRadio>();
+    GatedRadio* air = radio.get();
+    App app(std::move(cfg), std::move(radio), clock);
+    CHECK(app.start());
+    Client client(app, socket_path);
+    CHECK(client.connected());
+    if (!client.connected()) return;
+
+    CHECK_BYTES(client.command(set_name("Unsaved")), (Bytes {kRespErr, kErrFileIoError}));
+    CHECK_BYTES(client.command(set_tx_power(5)), (Bytes {kRespErr, kErrFileIoError}));
+    auto info = self_info(client);
+    CHECK(info && info->name == "4FD099CC");
+    CHECK_EQ(air->params().tx_power_dbm, 22);
+    app.request_stop();
+}
+
 int main() {
     if (!crypto::init()) return 2;
 
@@ -757,6 +1208,12 @@ int main() {
     test_lost_identity_is_not_replaced();
     test_companion_app_round_trip();
     test_pushes_wait_for_app_start();
+    test_app_changes_settings_live();
+    test_settings_survive_a_restart();
+    test_settings_while_the_radio_is_absent();
+    test_first_start_is_radio_silent();
+    test_repeat_byte_and_frequency_list();
+    test_unwritable_settings_are_refused();
 
     return finish("app");
 }

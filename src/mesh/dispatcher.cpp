@@ -172,6 +172,14 @@ void Dispatcher::expire_seen() {
     });
 }
 
+void Dispatcher::reconfigure(const radio::RadioParams& params) {
+    duty_.set_percent(params.duty_cycle_pct);
+    if (!(params == radio_.params())) radio_.reconfigure(params);
+    // A first frequency, or a budget with more room in it, may free what is
+    // queued.
+    pump();
+}
+
 bool Dispatcher::send(proto::Packet p, uint8_t priority, uint32_t delay_ms,
                       TxResultHandler on_result) {
     if (!p.valid()) {
@@ -255,7 +263,10 @@ void Dispatcher::pump() {
 
     // Hold everything while the radio is down (an unpowered chip waiting to be
     // retried, say) rather than hammering send() with nothing to send it to.
-    if (!radio_.ready()) {
+    // Likewise while it has no frequency, whatever the backend makes of that:
+    // until the config file or the app names one, the region is unknown and
+    // nothing goes on the air.
+    if (!radio_.ready() || !radio_.params().has_frequency()) {
         schedule_pump(kRadioDownRecheckMs);
         return;
     }

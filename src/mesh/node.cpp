@@ -67,7 +67,7 @@ void Node::start() {
 proto::AdvertAppData Node::build_appdata() const {
     proto::AdvertAppData app;
     app.flags = static_cast<uint8_t>(cfg_.adv_type & proto::kAdvTypeMask);
-    if (cfg_.has_location) {
+    if (cfg_.has_location()) {
         app.flags |= proto::kAdvHasLocation;
         app.lat_e6 = cfg_.lat_e6;
         app.lon_e6 = cfg_.lon_e6;

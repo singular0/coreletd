@@ -53,8 +53,8 @@ src/
 tests/        unit tests + frozen reference vectors
 ```
 
-Ownership runs one way. `App` constructs in a fixed order — identity, radio, dispatcher, node,
-state writer, companion server — because each stage needs the one before it.
+Ownership runs one way. `App` constructs in a fixed order — identity, the app's settings, radio,
+dispatcher, node, state writer, companion server — because each stage needs the one before it.
 
 - **`EventLoop`** owns `poll()`, the timers and the clock. Registrations own their lifetime, so a
   subsystem that goes away takes its watches with it. `main()` hangs its signal check on the loop's
@@ -77,6 +77,10 @@ state writer, companion server — because each stage needs the one before it.
   fsyncs. The cost is that a mutating command is answered before its bytes are on disk, which is
   what `healthy()` reports on.
 - **`Session`** translates companion frames into node operations and mesh events back into pushes.
+- **`SettingsStore`** owns the settings an app may change: the `settings` file, read over the
+  defaults before anything is built from it, and every change after — checked, written, then
+  applied to `Node` and, through `Dispatcher::reconfigure()`, the radio. Session sees it only as
+  the `companion::Settings` interface and never touches the config.
 
 `App` takes an optional radio and clock (`daemon/app.h`). That seam is what lets `tests/test_app.cpp`
 stand the whole stack up against a radio the test drives and a `ManualClock` that runs it on virtual
@@ -149,12 +153,27 @@ mirrors them in its `protocol/protocol.h`). Never renumber; append only.
   this is a Linux daemon. Don't add them, and don't restructure `Server` in anticipation of them.
 - **`SYNC_NEXT_MESSAGE` pops.** The daemon is not message storage; whatever the app collects, the
   app must persist or the message is gone.
-- **Settings the config file owns are refused, not silently accepted.** `SET_ADVERT_NAME`,
-  `SET_ADVERT_LATLON` and `SET_RADIO_PARAMS` answer `RESP_DISABLED`: accepting a change nothing
-  persists (and, for radio params, nothing re-applies to the SX1262) is worse than saying no.
-  `SET_RADIO_TX_POWER` is the deliberate exception — accepted and ignored with a log line, so the
-  app's settings screen still works. Unimplemented commands answer `ERR_UNSUPPORTED_CMD`:
-  telemetry, path tracing, room-server login, key import/export, signing, reboot.
+- **An app changes what MeshCore's companion lets it change, and nothing else:** the name, the
+  position, the radio preset, TX power, the airtime factor and repeat — `Config::app_keys()`.
+  Session turns each command into config keys with values in the settings file's syntax, and
+  `SettingsStore` puts them through the same table and `Config::validate()` the file gets, so an
+  app gets no wider a range than a hand edit. A change is written before it is answered, and a
+  write that fails answers `ERR_FILE_IO_ERROR` and applies nothing: these are not coalesced
+  through `StateWriter`, since they come a few a session and the reply has to be true. A name the
+  advert cannot carry is refused with `ERR_ILLEGAL_ARG`, never truncated as MeshCore truncates it.
+  Nothing is advertised on a change, as in MeshCore.
+- **The quirks of those commands are upstream's.** `SET_RADIO_PARAMS` without its trailing repeat
+  byte turns repeat *off* — although we claim protocol v3 and a v3 client has no reason to send it —
+  and an app may turn repeat on only at 433.000, 869.495 and 918.000 MHz (`repeat_freq_ranges`);
+  that is a check on the command, so `repeat` written into the settings file by hand is not held
+  to it. DEVICE_INFO appends the v9 repeat
+  byte and v10 path-hash byte so a client can read the state it must send back. Bandwidth arrives in
+  whole hertz (7800 for 7.81 kHz) and is snapped to the chip's within 1%, never further. The
+  airtime factor (0–9, in thousandths) is the duty cycle as `100 / (1 + af)`, so `radio.duty_cycle
+  = 100` is valid and means no limit. A non-zero RX delay is refused: nothing implements it.
+- **Unimplemented commands answer `ERR_UNSUPPORTED_CMD`**: telemetry, path tracing, room-server
+  login, key import/export, signing, reboot, and the other parameters — path-hash mode, auto-add,
+  flood scope, PIN, custom vars — until the feature behind each exists.
 - **Repeater and room-server roles are unimplemented, not ruled out.** `repeat` relays exactly
   what MeshCore's companion relays with repeat enabled; the repeater *role* — its CLI, ACLs,
   transport keys — and the room server are another matter. The daemon is a companion node today and
@@ -167,6 +186,13 @@ mirrors them in its `protocol/protocol.h`). Never renumber; append only.
   shared board-level state; while it is off, every SPI read returns zeroes. An absent radio is
   therefore a normal state, not a startup failure: the daemon comes up without one, retries every
   `[hardware] lora_retry_interval` seconds, and notices the rail going away mid-run.
+- **Retuning goes through the same `configure()` as bring-up.** `Radio::reconfigure()` on a running
+  SX1262 reprograms it at once, or after the packet on the air, since `configure()` begins with
+  `SetStandby`; on one that is down, recovery configures from the new parameters when the rail
+  returns. A change to the duty cycle alone is the dispatcher's and leaves the chip alone.
+- **No frequency is an idle radio, not a fault.** The SX1262 is neither reset nor configured until
+  `reconfigure()` names one, and the dispatcher holds anything queued while `params()` has none,
+  whatever the backend — that check is the one the test radios meet too.
 - **`XOSC_START_ERR` (`0x0020`) at power-up is not a fault.** The chip latches it because it starts
   its oscillator before DIO3 is configured to drive the TCXO; calibration clears it. Still reported
   afterwards means `[hardware] lora_tcxo` genuinely doesn't match the board.
@@ -181,21 +207,39 @@ mirrors them in its `protocol/protocol.h`). Never renumber; append only.
 ## Configuration
 
 `daemon/config.cpp` holds one table of settings — key, type, destination field, range — and parsing
-and validation both walk it. Add a setting there rather than threading it through by hand, and
-document it in `etc/coreletd.ini`: `tests/test_ini.cpp` reads the shipped file and checks the two
-agree in both directions, so an undocumented key and a documented non-key each fail the build's
-tests.
+and validation both walk it, for both files. Add a setting there rather than threading it through
+by hand. A config-file setting is documented in `etc/coreletd.ini`: `tests/test_ini.cpp` reads the
+shipped file and checks the two agree in both directions, so an undocumented key and a documented
+non-key each fail the build's tests.
 
-`[radio] lora_freq` deliberately has no default: transmitting on the wrong band is a legal problem,
-so the daemon refuses to start rather than picking one.
+The table's rows split by owner, and every key has exactly one. `Config::app_keys()` — what
+MeshCore's companion keeps in its preferences and lets an app change — are the settings file's,
+and `Config::load()` does not read them: a line for one in the config file is warned about and
+ignored. Everything else is the operator's, in the config file. There is no precedence between the
+two and nothing to migrate, which is the point: an app's change and an operator's edit to the same
+key would otherwise need a rule for which is newer. The settings file lives in `state_dir` because
+the config file is a dpkg conffile under `/etc`, which `ProtectSystem=strict` makes read-only to
+the daemon; and it is not shipped, so the defaults for its keys are the code's, in `config.h`, as
+MeshCore's are its build flags. The name is the exception: its default is the first four bytes of
+the public key in upper-case hex, as MeshCore's companion names a node without `ADVERT_NAME`, so
+`App::start()` loads the identity before the settings and fills it in where nothing else has. It is sparse — only the keys that have been set, in the config
+file's syntax — so a default changed in the code reaches every node that never set the key. An
+operator without an app writes it by hand with the daemon stopped, and a value there that the
+table or `Config::validate()` refuses stops startup rather than being guessed around.
 
-`[storage] state_dir` has none either, and is the only storage setting: every state file sits in it
-under a fixed name, so the directory is the whole of a backup. It must be absolute and must already
+`[radio] lora_freq` deliberately has no default: transmitting on the wrong band is a legal problem.
+Without one the daemon starts radio-silent and stays so until an app sets the radio parameters,
+which is what MeshCore does — presets live in the phone app, and the firmware has no band plan
+either. The package still installs the service disabled.
+
+`[storage] state_dir` has no default either, and is the only storage setting: every state file sits
+in it under a fixed name, so the directory is the whole of a backup. It must be absolute and must already
 exist — the daemon never creates it, because a path that isn't there is likelier a typo than a first
 run, and creating it would quietly mint a new node. The old default guessed from the effective uid,
 which made `sudo coreletd` and `coreletd` two different nodes. For the same reason a missing
 `identity` beside existing `contacts`, `channels` or `messages` stops startup rather than generating
-a key. The shipped `coreletd.ini` sets it to `/var/lib/coreletd`, which is what the unit's
+a key — but not beside `settings`, which holds nothing bound to the key and is what an operator
+without an app writes before the first start. The shipped `coreletd.ini` sets it to `/var/lib/coreletd`, which is what the unit's
 `StateDirectory=` creates; `ProtectSystem=strict` makes any other path read-only, so a mismatch fails
 at startup.
 

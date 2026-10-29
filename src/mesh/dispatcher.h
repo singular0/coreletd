@@ -83,6 +83,10 @@ public:
     // True if this packet was already seen recently; records it either way.
     bool check_and_mark_seen(const proto::Packet& p);
 
+    // New radio parameters, from the app. The duty cycle among them is ours to
+    // pace against; the rest go to the radio.
+    void reconfigure(const radio::RadioParams& params);
+
     const DispatcherStats& stats() const { return stats_; }
     size_t queue_depth() const { return queue_.size(); }
     radio::Radio& radio() { return radio_; }

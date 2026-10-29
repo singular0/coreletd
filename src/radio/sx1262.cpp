@@ -345,6 +345,9 @@ bool Sx1262::begin(EventLoop& loop, std::string& error) {
     irq_watch_ = loop.add_fd(irq_line_->fd(), POLLIN, [this](short) { on_irq(); });
 
     if (retry_interval_ms_ == 0) {
+        // Without a frequency the chip is left alone until reconfigure()
+        // supplies one, which brings it up then.
+        if (!params_.has_frequency()) return true;
         if (!bring_up(error)) return false;
         ever_healthy_ = true;
         LOG_INFO("sx1262: %s", describe().c_str());
@@ -363,7 +366,9 @@ bool Sx1262::begin(EventLoop& loop, std::string& error) {
 }
 
 void Sx1262::start_recovery() {
-    if (!loop_ || healthy_ || recovering_) return;
+    // No frequency is no radio to bring up: the chip stays idle, untouched,
+    // until reconfigure() names one.
+    if (!loop_ || healthy_ || recovering_ || !params_.has_frequency()) return;
     recovering_ = true;
 
     if (!reset_line_) {
@@ -489,6 +494,9 @@ void Sx1262::go_down(const char* why) {
     }
     initial_failure_reported_ = true;
     healthy_ = false;
+    // Recovery configures from params_, so a retune waiting on the
+    // transmission happens there instead.
+    retune_pending_ = false;
     if (txen_line_) txen_line_->set(false);
     if (rxen_line_) rxen_line_->set(false);
 
@@ -601,7 +609,8 @@ bool Sx1262::configure(std::string& error) {
     if (!write_register(kRegOcpConfig, ByteView(&ocp, 1)))
         return fail_with("over-current protection");
 
-    int8_t power = static_cast<int8_t>(std::clamp(params_.tx_power_dbm, -9, 22));
+    int8_t power =
+        static_cast<int8_t>(std::clamp(params_.tx_power_dbm, kMinTxPowerDbm, kMaxTxPowerDbm));
     if (!cmd(kCmdSetTxParams, Bytes {static_cast<uint8_t>(power), 0x04 /* 200us ramp */}))
         return fail_with("SetTxParams");
 
@@ -648,6 +657,64 @@ bool Sx1262::configure(std::string& error) {
     if (e & ~0x0020) LOG_WARN("sx1262: device errors 0x%04x", e);
 
     return true;
+}
+
+void Sx1262::reconfigure(const RadioParams& params) {
+    RadioParams before = params_;
+    params_ = params;
+    // The duty cycle is the dispatcher's to enforce and nothing on the chip
+    // depends on it, so a change to it alone is no reason to retune.
+    before.duty_cycle_pct = params_.duty_cycle_pct;
+    if (before == params_ || !loop_) return;
+
+    if (healthy_) {
+        // configure() begins with SetStandby, which would end a packet half
+        // way through the air.
+        if (tx_busy_) {
+            retune_pending_ = true;
+            return;
+        }
+        retune();
+        return;
+    }
+
+    // Down, the next recovery configures from these. Never given a frequency,
+    // nothing is retrying, so this is what brings the radio up.
+    if (before.has_frequency()) return;
+    if (retry_interval_ms_ > 0) {
+        start_recovery();
+        return;
+    }
+    std::string error;
+    if (!bring_up(error)) {
+        LOG_ERROR("sx1262: %s", error.c_str());
+        return;
+    }
+    ever_healthy_ = true;
+    LOG_INFO("sx1262: %s", describe().c_str());
+}
+
+void Sx1262::retune() {
+    retune_pending_ = false;
+    std::string error;
+    if (!configure(error)) {
+        LOG_ERROR("sx1262: retuning: %s", error.c_str());
+        go_down("radio marked down after a failed retune");
+        return;
+    }
+    if (!set_rx_mode()) {
+        fail("returning to RX after retuning");
+        return;
+    }
+    LOG_INFO("sx1262: retuned — %s", describe().c_str());
+}
+
+void Sx1262::after_tx(const char* what) {
+    if (retune_pending_) {
+        retune();
+    } else if (!set_rx_mode()) {
+        fail(what);
+    }
 }
 
 bool Sx1262::set_modulation() {
@@ -769,7 +836,7 @@ bool Sx1262::send(ByteView data) {
         if (!tx_busy_) return;
         LOG_ERROR("sx1262: transmit timed out, resetting to receive");
         tx_busy_ = false;
-        if (!set_rx_mode()) fail("returning to RX after a TX timeout");
+        after_tx("returning to RX after a TX timeout");
         deliver_tx_done(0);
     });
     return true;
@@ -839,7 +906,7 @@ void Sx1262::handle_tx_done() {
     if (txen_line_) txen_line_->set(false);
 
     uint32_t airtime = millis() - tx_started_ms_;
-    if (!set_rx_mode()) fail("returning to RX after TX");
+    after_tx("returning to RX after TX");
     deliver_tx_done(airtime);
 }
 
@@ -895,6 +962,7 @@ void Sx1262::shutdown() {
     tx_timeout_.reset();
     recovering_ = false;
     tx_busy_ = false;
+    retune_pending_ = false;
 
     if (healthy_) {
         cmd(kCmdSetStandby, Bytes {kStandbyRc});
@@ -916,6 +984,8 @@ void Sx1262::shutdown() {
 }
 
 std::string Sx1262::describe() const {
+    if (!params_.has_frequency())
+        return vformat("SX1262 on %s, idle: no frequency set", pins_.spidev.c_str());
     // The preamble is in here because it is the one air setting with no line in
     // the config file to read it off: unset means derived from the spreading
     // factor, so the log is the only place it is visible to compare against a

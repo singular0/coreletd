@@ -2,6 +2,7 @@
 
 #include <sys/stat.h>
 
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -62,8 +63,8 @@ mesh::LoadResult load_state(Store& store, const std::string& path, const char* w
 // a channel list nobody edits, may never come. The backup and the temporary a
 // crashed save leaves behind are copies of the same secrets.
 void restrict_state_files(const Config& cfg) {
-    for (const std::string& path :
-         {cfg.identity_path(), cfg.contacts_path(), cfg.channels_path(), cfg.messages_path()}) {
+    for (const std::string& path : {cfg.identity_path(), cfg.contacts_path(), cfg.channels_path(),
+                                    cfg.messages_path(), cfg.settings_path()}) {
         for (const char* suffix : {"", ".bak", ".tmp"}) restrict_to_owner(path + suffix);
     }
 }
@@ -71,6 +72,14 @@ void restrict_state_files(const Config& cfg) {
 bool exists(const std::string& path) {
     struct stat st {};
     return ::stat(path.c_str(), &st) == 0;
+}
+
+// What MeshCore's companion calls a node nobody has named: the first four
+// bytes of its key, in the upper-case hex Utils::toHex writes.
+std::string default_name(ByteView pub) {
+    std::string name = hex(subview(pub, 0, 4));
+    for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return name;
 }
 
 }  // namespace
@@ -115,7 +124,9 @@ bool App::load_or_create_identity() {
     // No key, but a node has lived here: the key was lost — a partial restore,
     // a stray rm — rather than never made. Minting one would start a stranger
     // on top of that node's contacts and channels, and every peer that knew it
-    // would be left holding a contact that never speaks again.
+    // would be left holding a contact that never speaks again. The settings
+    // are not evidence of that: nothing in them is bound to the key, and an
+    // operator without an app writes them before the first start.
     for (const std::string& path :
          {cfg_.contacts_path(), cfg_.channels_path(), cfg_.messages_path()}) {
         if (!exists(path)) continue;
@@ -160,7 +171,21 @@ bool App::start() {
     if (!crypto::init()) return false;
     if (!check_state_dir()) return false;
     restrict_state_files(cfg_);
+    // First, since the default name is the key's. A first run whose settings
+    // are refused below keeps the key it minted, which is the node's either
+    // way.
     if (!load_or_create_identity()) return false;
+    if (cfg_.node.name.empty()) cfg_.node.name = default_name(identity_->pub());
+
+    // Before anything is built from the config, since the settings choose the
+    // radio's parameters and the node's name.
+    settings_ = std::make_unique<SettingsStore>(cfg_);
+    std::string error;
+    if (!settings_->load(error)) {
+        LOG_ERROR("settings: %s — correct it, or remove the line to take the default",
+                  error.c_str());
+        return false;
+    }
 
     contacts_ = std::make_unique<mesh::ContactStore>(*identity_, cfg_.contacts_path());
     if (load_state(*contacts_, cfg_.contacts_path(), "contacts") == mesh::LoadResult::Missing)
@@ -170,10 +195,13 @@ bool App::start() {
     if (load_state(*channels_, cfg_.channels_path(), "channels") == mesh::LoadResult::Missing)
         LOG_INFO("channels: using defaults (slot 0 = Public)");
 
-    std::string error;
     // Non-null already only when one was handed to the constructor; otherwise
-    // construct the production backend compiled into this build.
-    if (!radio_) radio_ = make_radio(error);
+    // construct the production backend compiled into this build. A radio
+    // handed in was built before the settings file was read.
+    if (!radio_)
+        radio_ = make_radio(error);
+    else
+        radio_->reconfigure(cfg_.radio);
     if (!radio_) {
         LOG_ERROR("radio: %s", error.c_str());
         return false;
@@ -188,6 +216,7 @@ bool App::start() {
     node_ = std::make_unique<mesh::Node>(loop_, *dispatcher_, *identity_, *contacts_, *channels_,
                                          cfg_.node);
     node_->start();
+    settings_->attach(*node_, *dispatcher_);
 
     if (load_state(node_->inbox(), cfg_.messages_path(), "messages") ==
         mesh::LoadResult::Loaded) {
@@ -213,7 +242,8 @@ bool App::start() {
     metrics_ = std::make_unique<HostMetrics>(std::move(info), cfg_.state_dir);
 
     session_ = std::make_unique<companion::Session>(loop_.clock(), *server_, *node_, *contacts_,
-                                                    *channels_, *radio_, *state_, *metrics_);
+                                                    *channels_, *radio_, *state_, *metrics_,
+                                                    *settings_);
     session_->attach();
 
     log_status();
@@ -225,6 +255,10 @@ void App::log_status() {
     LOG_INFO("  node      : %s \"%s\"", hex_prefix(identity_->pub()).c_str(),
              cfg_.node.name.c_str());
     LOG_INFO("  radio     : %s", radio_->describe().c_str());
+    if (!cfg_.radio.has_frequency()) {
+        LOG_WARN("no frequency set — nothing is transmitted until a companion app sets the "
+                 "radio parameters");
+    }
     if (cfg_.companion.transport == companion::Server::Transport::Unix)
         LOG_INFO("  companion : unix://%s", cfg_.companion.socket_path.c_str());
     else

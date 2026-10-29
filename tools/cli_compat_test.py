@@ -478,28 +478,70 @@ class Harness:
     def phase_refusals(self) -> None:
         self.banner("refusals", "what the daemon does not do, and how it says so")
         c = self.report.check
-        n = self.report.note
-
-        _, text, took = self.cli.run("set", "tx", "20")
-        tx = first(self.cli.docs("infos"), "tx_power").get("tx_power")
-        c("refusals", "TX power is accepted and left as configured",
-          "Error" not in text and tx == 22, f"tx_power {tx}")
 
         for what, cmds in (("telemetry", ("self_telemetry",)), ("flood scope", ("scope", "#x"))):
             _, text, took = self.cli.run(*cmds)
             c("refusals", f"{what} is refused at once", took < T_CLI_REPLY - 5 and "rror" in text,
               f"{took:.1f} s: {text.strip().splitlines()[-1][:80] if text.strip() else ''}")
 
-        # The config file owns the name, so the daemon answers RESP_DISABLED.
-        # meshcore-cli only listens for that after a key export, so it sits out
-        # its own timeout; what matters is that it says no and nothing changes.
-        _, text, took = self.cli.run("set", "name", "renamed", timeout=T_CLI + T_CLI_REPLY)
-        name = first(self.cli.docs("infos"), "name").get("name")
-        c("refusals", "a name change is refused and not applied",
-          "Error" in text and name == self.name, f"still {name!r}")
-        if took > T_CLI_REPLY - 2:
-            n(f"meshcore-cli waited {took:.0f} s for the name change to be answered: it does not "
-              "recognise RESP_DISABLED there, so it times out rather than reporting the refusal")
+    def phase_settings(self) -> None:
+        self.banner("settings", "what an app may change, applied at once")
+        c = self.report.check
+
+        def infos() -> dict:
+            return first(self.cli.docs("infos"), "public_key")
+
+        _, text, took = self.cli.run("set", "name", "renamed")
+        info = infos()
+        c("settings", "a name change is applied", "Error" not in text
+          and info.get("name") == "renamed", f"{info.get('name')!r} in {took:.1f} s")
+        # Not advertised by itself, as MeshCore does not; the next one has it.
+        mark = self.sim.mark()
+        self.cli.docs("floodadv")
+        heard = self.sim.heard("advert", mark)
+        c("settings", "the next advert carries the new name",
+          heard.get("name") == "renamed" and heard.get("verified") is True,
+          f"{heard.get('name')!r}, verified={heard.get('verified')}")
+
+        _, text, _ = self.cli.run("set", "tx", "20")
+        info = infos()
+        c("settings", "TX power is applied", "Error" not in text and info.get("tx_power") == 20,
+          f"tx_power {info.get('tx_power')} of {info.get('max_tx_power')}")
+
+        _, text, _ = self.cli.run("set", "coords", "51.5074,-0.1278")
+        info = infos()
+        lat, lon = float(info.get("adv_lat", 0)), float(info.get("adv_lon", 0))
+        c("settings", "a position is applied", "Error" not in text
+          and abs(lat - 51.5074) < 1e-6 and abs(lon + 0.1278) < 1e-6, f"{lat}, {lon}")
+
+        # With a position the advert has 23 bytes for the name, and a longer
+        # one is refused rather than cut.
+        _, text, _ = self.cli.run("set", "name", "x" * 24)
+        info = infos()
+        c("settings", "a name the advert cannot carry is refused",
+          "Error" in text and info.get("name") == "renamed", f"still {info.get('name')!r}")
+
+        _, text, _ = self.cli.run("set", "radio", "869.525,250,11,5")
+        info = infos()
+        radio = (info.get("radio_freq"), info.get("radio_bw"), info.get("radio_sf"),
+                 info.get("radio_cr"))
+        c("settings", "radio parameters are applied",
+          "Error" not in text and radio == (869.525, 250.0, 11, 5), f"{radio}")
+
+        # Repeat is MeshCore's to the letter: only at 433, 869.495 and 918 MHz.
+        _, text, _ = self.cli.run("set", "radio", "869.525,250,11,5,on")
+        c("settings", "repeat off MeshCore's frequencies is refused", "Error" in text,
+          text.strip().splitlines()[-1][:80] if text.strip() else "")
+
+        # Back to how the sim started, so nothing after this depends on order.
+        for cmd in (("set", "radio", "869.618,62.5,8,5"), ("set", "tx", "22"),
+                    ("set", "coords", "0,0"), ("set", "name", self.name)):
+            self.cli.run(*cmd)
+        info = infos()
+        c("settings", "and all of it can be put back",
+          info.get("name") == self.name and info.get("radio_freq") == 869.618
+          and info.get("tx_power") == 22 and float(info.get("adv_lat", 1)) == 0,
+          f"{info.get('name')!r} {info.get('radio_freq')} MHz {info.get('tx_power')} dBm")
 
     def phase_remove(self) -> None:
         self.banner("remove", "forgetting a contact")
@@ -509,7 +551,7 @@ class Harness:
                           f"still listed as {left.get('adv_name')!r}" if left else "")
 
     PHASES = ["connect", "contacts", "inbox", "live", "direct", "channel", "channels",
-              "adverts", "time", "routes", "refusals", "remove"]
+              "adverts", "time", "routes", "refusals", "settings", "remove"]
 
     def run(self) -> int:
         try:

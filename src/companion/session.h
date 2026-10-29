@@ -5,6 +5,7 @@
 
 #include "companion/device_metrics.h"
 #include "companion/server.h"
+#include "companion/settings.h"
 #include "mesh/node.h"
 #include "mesh/state_writer.h"
 #include "radio/radio.h"
@@ -21,7 +22,7 @@ public:
     // nothing, it only measures how long a send took, so a Clock is enough.
     Session(const Clock& clock, Server& server, mesh::Node& node, mesh::ContactStore& contacts,
             mesh::ChannelStore& channels, radio::Radio& radio, mesh::StateWriter& state,
-            const DeviceMetrics& metrics);
+            const DeviceMetrics& metrics, Settings& settings);
 
     void attach();
 
@@ -58,6 +59,9 @@ private:
     Bytes cmd_set_advert_latlon(ByteView args);
     Bytes cmd_get_battery(ByteView args);
     Bytes cmd_set_radio_params(ByteView args);
+    Bytes cmd_set_tx_power(ByteView args);
+    Bytes cmd_set_tuning_params(ByteView args);
+    Bytes cmd_get_tuning_params(ByteView args);
     Bytes cmd_export_contact(ByteView args);
 
     Bytes self_info_frame() const;
@@ -66,6 +70,9 @@ private:
     // Reply for a command that changed persisted state: queues the write and
     // reports whether the last one reached disk.
     Bytes saved_reply();
+    // Reply for a settings command, which has been written by the time it
+    // returns.
+    Bytes settings_reply(std::vector<Settings::Change> changes);
 
     const Clock& clock_;
     Server& server_;
@@ -75,6 +82,7 @@ private:
     radio::Radio& radio_;
     mesh::StateWriter& state_;
     const DeviceMetrics& metrics_;
+    Settings& settings_;
 
     // Set once the app has sent CMD_APP_START, and cleared for each new
     // connection. Commands before that are still answered — some clients probe

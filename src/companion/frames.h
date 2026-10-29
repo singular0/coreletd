@@ -53,6 +53,7 @@ enum Cmd : uint8_t {
     kCmdGetCustomVars = 40,
     kCmdSetCustomVar = 41,
     kCmdGetAdvertPath = 42,
+    kCmdGetTuningParams = 43,
 };
 
 enum Resp : uint8_t {
@@ -79,6 +80,7 @@ enum Resp : uint8_t {
     kRespSignature = 20,
     kRespCustomVars = 21,
     kRespAdvertPath = 22,
+    kRespTuningParams = 23,
 };
 
 enum Push : uint8_t {

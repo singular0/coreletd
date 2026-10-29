@@ -41,6 +41,7 @@ struct Config {
     std::string contacts_path() const { return state_dir + "/contacts"; }
     std::string channels_path() const { return state_dir + "/channels"; }
     std::string messages_path() const { return state_dir + "/messages"; }
+    std::string settings_path() const { return state_dir + "/settings"; }
 
     radio::RadioParams radio;
     SpiConfig spi;
@@ -48,14 +49,34 @@ struct Config {
     mesh::Node::Config node;
     companion::Server::Options companion;
 
-    // Loads the file and applies it over the defaults above. Returns false with
-    // `error` set on a malformed file or an out-of-range value.
+    // Loads the config file and applies it over the defaults above. Returns
+    // false with `error` set on a malformed file or an out-of-range value. The
+    // keys an app may change are not read from it: they are the settings
+    // file's, and a line for one is warned about and ignored.
     bool load(const std::string& path, std::string& error);
 
-    // Every key load() understands, in file order. Derived from the same table
-    // load() reads, so a setting cannot be added without turning up here; the
-    // tests use it to hold the shipped coreletd.ini to the same key set.
+    // The checks no one key can make: the advert name has to fit beside the
+    // position, for one. Run on what the settings file makes of the defaults,
+    // and again on every change the app asks for.
+    bool validate(std::string& error) const;
+
+    // Every key the config file takes, in file order. Derived from the same
+    // table load() reads, so a setting cannot be added without turning up
+    // here; the tests use it to hold the shipped coreletd.ini to the same key
+    // set.
     static std::vector<std::string_view> keys();
+
+    // The keys a companion app may change, and so the only ones get() and set()
+    // take and the settings file may hold. None of them is a key().
+    static bool app_key(std::string_view key);
+    static std::vector<std::string_view> app_keys();
+
+    // An app key's value, as the settings file writes it: one spelling per
+    // value, so two can be compared as text.
+    std::string get(std::string_view key) const;
+    // Parses `value` into an app key with the checks its line in the settings
+    // file gets. Returns false with `error` set otherwise.
+    bool set(std::string_view key, std::string_view value, std::string& error);
 
     // Hands the subsystems the paths they own, once state_dir is final.
     void finalise();

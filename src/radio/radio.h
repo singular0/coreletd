@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <functional>
+#include <optional>
 #include <string>
 
 #include "daemon/eventloop.h"
@@ -37,8 +39,27 @@ struct RxFailure {
     float snr = 0.0f;
 };
 
+// The SX1262's high-power PA, in dBm. The top is also the top of an app's power
+// slider, which it builds from what SELF_INFO reports.
+inline constexpr int kMinTxPowerDbm = -9;
+inline constexpr int kMaxTxPowerDbm = 22;
+
+// The LoRa bandwidths the SX1262 offers, in kHz as the datasheet rounds them.
+inline constexpr std::array<double, 10> kBandwidthsKhz = {
+    7.81, 10.42, 15.63, 20.83, 31.25, 41.67, 62.5, 125.0, 250.0, 500.0,
+};
+
+// The supported bandwidth `khz` names, or nullopt when none is within 1%. Apps
+// send whole hertz — 7800 for the datasheet's 7.81 kHz, 41700 for its 41.67 —
+// so an exact match cannot be asked of them, and the bandwidths are far enough
+// apart that anything within 1% names exactly one. Further off than that is a
+// bandwidth the chip does not have, and picking the nearest would be choosing a
+// different one: on the air, a mismatch is silence.
+std::optional<double> nearest_bandwidth(double khz);
+
 // Defaults are MeshCore's on-air settings. Frequency deliberately has no
-// default: the region is a legal question, so the config file must state it.
+// default: the region is a legal question, so the config file or the app must
+// state it, and until one does nothing is transmitted.
 struct RadioParams {
     double freq_mhz = 0.0;
     double bw_khz = 62.5;
@@ -57,8 +78,13 @@ struct RadioParams {
     bool dio2_as_rf_switch = true;
     bool rx_boosted_gain = true;
     int current_limit_ma = 140;
-    // Regulatory transmit budget, as a percentage of wall time.
+    // Regulatory transmit budget, as a percentage of wall time. 100 is no
+    // limit, which is what MeshCore's airtime factor of 0 means.
     double duty_cycle_pct = 10.0;
+
+    bool operator==(const RadioParams&) const = default;
+
+    bool has_frequency() const { return freq_mhz > 0; }
 
     // Low-data-rate optimisation is part of the physical layer, not a tuning
     // preference: a mismatch is no link at all, in either direction, with a
@@ -118,6 +144,12 @@ public:
     virtual const RadioParams& params() const = 0;
     virtual std::string describe() const = 0;
 
+    // Replaces the parameters, which carry a frequency. A radio that is up
+    // retunes at once, or after the transmission in flight if there is one;
+    // one that is down, or was never given a frequency, starts from these
+    // whenever it comes up. Called before begin() it only replaces them.
+    virtual void reconfigure(const RadioParams& params) = 0;
+
     void set_rx_handler(RxHandler h) { on_rx_ = std::move(h); }
     void set_rx_error_handler(RxErrorHandler h) { on_rx_error_ = std::move(h); }
     void set_tx_done_handler(TxDoneHandler h) { on_tx_done_ = std::move(h); }
@@ -150,6 +182,9 @@ public:
     // The window is an hour wide, so the clock has to come from outside for any
     // of this to be observable in a test.
     DutyCycle(const Clock& clock, double percent) : clock_(clock), percent_(percent) {}
+
+    // The airtime already spent stays counted against the new budget.
+    void set_percent(double percent) { percent_ = percent; }
 
     void record(uint32_t airtime_ms);
     // Milliseconds to wait before transmitting a packet with the given airtime;

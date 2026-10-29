@@ -46,6 +46,7 @@ public:
     bool channel_busy() override;
     const RadioParams& params() const override { return params_; }
     std::string describe() const override;
+    void reconfigure(const RadioParams& params) override;
 
 private:
     // --- low level ---
@@ -72,6 +73,11 @@ private:
 
     // --- configuration ---
     bool configure(std::string& error);
+    // Reprograms a running chip with params_ and puts it back into receive.
+    void retune();
+    // Back to receiving once a transmission is over, retuning first if the
+    // parameters changed while it was on the air.
+    void after_tx(const char* what);
     bool set_modulation();
     bool set_packet_params(uint8_t payload_len);
     bool set_rx_mode();
@@ -105,6 +111,9 @@ private:
 
     bool tx_busy_ = false;
     uint32_t tx_started_ms_ = 0;
+    // Parameters changed while a packet was on the air, which retuning would
+    // have cut short; they are applied as soon as it is done.
+    bool retune_pending_ = false;
     // When the preamble or header flag was first seen set, so a reception that
     // never completes cannot latch the channel busy forever.
     uint32_t rx_since_ms_ = 0;

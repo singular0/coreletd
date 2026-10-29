@@ -909,7 +909,7 @@ class Harness:
         c("advert_rx", "the contact reached the state directory",
           "No such file" not in on_disk, on_disk[-70:])
 
-    def receive_from_peer(self, how: str) -> dict | None:
+    def receive_from_peer(self, how: str, phase: str = "message_rx") -> dict | None:
         """The peer sends us a message; checks it was acked, stored and attributed.
 
         `how` names the routing the message is expected to take, and labels the
@@ -925,7 +925,7 @@ class Harness:
                              timeout=T_CLI_BLE + T_MESSAGE)
         sent = next((d for d in docs if "expected_ack" in d), {})
         expected = sent.get("expected_ack", "")
-        c("message_rx", f"peer accepted the {how} message for sending", bool(expected),
+        c(phase, f"peer accepted the {how} message for sending", bool(expected),
           f"expected ack {expected}, suggested timeout {sent.get('suggested_timeout')} ms")
 
         ack = next((d for d in docs if "code" in d), {})
@@ -939,15 +939,15 @@ class Harness:
             acked = bool(line)
             detail = ("we sent it, the peer did not hear it back in time: " + line[-60:]
                       if line else "no ack, and none in our log either")
-        c("message_rx", f"coreletd acked the {how} message", acked, detail)
+        c(phase, f"coreletd acked the {how} message", acked, detail)
 
         inbox = self.drain_inbox(self.uconsole, body, T_MESSAGE)
         got = next((m for m in inbox if body in (m.get("text") or "")), None)
-        c("message_rx", f"the {how} message is in our inbox with the right text", got is not None,
+        c(phase, f"the {how} message is in our inbox with the right text", got is not None,
           f"{(got or {}).get('text')!r}" if got
           else f"{len(inbox)} message(s) read, none matching")
         if got:
-            c("message_rx", "it is attributed to the peer",
+            c(phase, "it is attributed to the peer",
               (got.get("pubkey_prefix") or "").lower().startswith(self.peer_key[:12].lower()),
               f"from {got.get('pubkey_prefix')} SNR {got.get('SNR')} dB "
               f"path_len {got.get('path_len')}")
@@ -1002,12 +1002,14 @@ class Harness:
             c("message_rx", "it arrived direct, down the route we returned",
               got.get("path_len") == 255, f"path_len {got.get('path_len')}")
 
-    def phase_message_tx(self) -> None:
-        self.banner("message_tx", "coreletd → peer, retried until acknowledged")
+    def send_to_peer(self, what: str, phase: str) -> tuple[list, str, bool]:
+        """We send the peer a message; checks it was accepted and acknowledged.
+
+        Returns what meshcore-cli printed, the ack it expected, and whether the
+        ack arrived.
+        """
         c = self.report.check
-        self.ensure_peer_knows_us()
-        self.ensure_peer_contact()
-        body = self.tag("tx")
+        body = self.tag(what)
 
         # The peer only acks after decrypting, so its ack — reported back to us
         # as PUSH_SEND_CONFIRMED — is the delivery receipt. Reading the peer's
@@ -1017,13 +1019,21 @@ class Harness:
                                  timeout=T_CLI_TCP + T_MESSAGE)
         sent = next((d for d in docs if "expected_ack" in d), {})
         expected = sent.get("expected_ack", "")
-        c("message_tx", "coreletd accepted the message", bool(expected),
+        c(phase, "coreletd accepted the message", bool(expected),
           f"expected ack {expected}, "
           f"routed {'direct' if sent.get('type') == 0 else 'flood'}, "
           f"suggested timeout {sent.get('suggested_timeout')} ms")
 
         acked, detail = self.await_ack(expected, docs, T_ACK_LADDER)
-        c("message_tx", "the peer acknowledged it", acked, detail)
+        c(phase, "the peer acknowledged it", acked, detail)
+        return docs, expected, acked
+
+    def phase_message_tx(self) -> None:
+        self.banner("message_tx", "coreletd → peer, retried until acknowledged")
+        c = self.report.check
+        self.ensure_peer_knows_us()
+        self.ensure_peer_contact()
+        docs, expected, acked = self.send_to_peer("tx", "message_tx")
 
         # The round trip is measured by the daemon itself, off the event loop's
         # clock; zero would mean it never started the timer. Only the push
@@ -1069,6 +1079,44 @@ class Harness:
         c("path", "the peer's returned path restores the route",
           relearned.get("out_path_len", -1) >= 0,
           f"out_path_len={relearned.get('out_path_len')}")
+
+    def phase_settings(self) -> None:
+        self.banner("settings", "a radio parameter changed from the app, and put back")
+        c = self.report.check
+        self.ensure_peer_knows_us()
+        self.ensure_peer_contact()
+
+        def retunes() -> int:
+            out = self.ssh.run(f"grep -c 'sx1262: retuned' {self.log} 2>/dev/null || true")
+            return int(out.stdout.strip()) if out.stdout.strip().isdigit() else 0
+
+        # The coding rate, because the explicit header carries it: the peer
+        # decodes either value, so a restore that fails costs airtime rather
+        # than the rest of the run. The SX1262 is reprogrammed all the same,
+        # through the configure() a new frequency would take.
+        other = 5 if self.a.cr != 5 else 8
+        preset = f"{self.a.freq},{self.a.bw},{self.a.sf}"
+        before = retunes()
+        info = self.uconsole.cli("set", "radio", f"{preset},{other}", "infos")[-1]
+        c("settings", "SET_RADIO_PARAMS is applied, and the handshake reports it",
+          int(info.get("radio_cr", 0)) == other,
+          f"CR 4/{info.get('radio_cr')} at {info.get('radio_freq')} MHz")
+        retuned = retunes() > before
+        c("settings", "the SX1262 was retuned for it", retuned,
+          "" if retuned else "no 'sx1262: retuned' in the log")
+
+        before = retunes()
+        info = self.uconsole.cli("set", "radio", f"{preset},{self.a.cr}", "infos")[-1]
+        c("settings", "and put back",
+          int(info.get("radio_cr", 0)) == self.a.cr
+          and abs(float(info.get("radio_freq", 0)) - self.a.freq) < 0.0005
+          and int(info.get("radio_sf", 0)) == self.a.sf and retunes() > before,
+          f"CR 4/{info.get('radio_cr')} at {info.get('radio_freq')} MHz SF{info.get('radio_sf')}")
+
+        # Twice reprogrammed under a running daemon, the radio still has to
+        # carry a conversation, in both directions.
+        self.receive_from_peer("after retuning", phase="settings")
+        self.send_to_peer("tx after retuning", "settings")
 
     def phase_relay(self) -> None:
         self.banner("relay", "with repeat on, coreletd relays what MeshCore relays")
@@ -1200,7 +1248,14 @@ class Harness:
     # -- daemon lifecycle -------------------------------------------------
 
     def write_config(self, repeat: bool) -> None:
-        ini = "\n".join([
+        """Writes the config file, and the settings an app would have set.
+
+        The settings file is written whole, so whatever an interrupted settings
+        phase left in it is undone too. The repeat it sets is not held to the
+        frequencies MeshCore lets an app turn repeat on at: that is a check on
+        the app.
+        """
+        settings = "\n".join([
             "# Written by tools/hw_e2e_test.py. Edits here are overwritten.",
             "[radio]",
             f"lora_freq = {self.a.freq}",
@@ -1208,6 +1263,14 @@ class Harness:
             f"lora_sf = {self.a.sf}",
             f"lora_cr = {self.a.cr}",
             f"lora_tx_power = {self.a.tx_power}",
+            "[node]",
+            f"advert_name = {self.a.node_name}",
+            # Off except in the relay phase, which turns it on for itself.
+            f"repeat = {1 if repeat else 0}",
+            "",
+        ])
+        ini = "\n".join([
+            "# Written by tools/hw_e2e_test.py. Edits here are overwritten.",
             "[hardware]",
             f"spidev = {self.a.spidev}",
             f"lora_gpiochip = {self.a.gpiochip}",
@@ -1217,12 +1280,9 @@ class Harness:
             "[storage]",
             f"state_dir = {self.home}/{self.a.remote_dir}/state",
             "[node]",
-            f"advert_name = {self.a.node_name}",
             # Adverts on demand only: every assertion below is about a packet
             # this script asked for.
             "advert_interval = 0",
-            # Off except in the relay phase, which turns it on for itself.
-            f"repeat = {1 if repeat else 0}",
             "[companion]",
             "companion_interface = tcp",
             "companion_bind = 127.0.0.1",
@@ -1231,11 +1291,12 @@ class Harness:
             "log_level = debug",
             "",
         ])
-        # Quoted heredoc: the file is written exactly as composed here.
+        # Quoted heredocs: the files are written exactly as composed here.
         self.ssh.check(f"cat > {self.ini} <<'CORELETD_INI'\n{ini}CORELETD_INI")
+        self.ssh.check(f"cat > {self.state}/settings <<'CORELETD_INI'\n{settings}CORELETD_INI")
 
     def restart_daemon(self, repeat: bool) -> bool:
-        """Restarts coreletd on a rewritten config; True once its radio is back."""
+        """Restarts coreletd on rewritten files; True once its radio is back."""
         self.stop_daemon()
         self.write_config(repeat)
         before = self.radio_up_count()
@@ -1436,6 +1497,7 @@ PHASES = [
     ("message_rx", "peer → coreletd, flooded then direct, each acked", True),
     ("message_tx", "coreletd → peer, retried until acknowledged", True),
     ("path", "a reset route falls back to flood and is relearned", True),
+    ("settings", "a radio parameter changed from the app, and put back", True),
     ("relay", "with repeat on, coreletd relays what MeshCore relays", False),
     ("channel", "a group message on a private channel", False),
     ("restart", "state survives a stop and start", True),

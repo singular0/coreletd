@@ -1,7 +1,10 @@
 #include "companion/session.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <iterator>
 
 #include "util/clock.h"
 #include "util/hex.h"
@@ -39,11 +42,44 @@ void put_padded(Bytes& out, ByteView data, size_t width) {
     out.insert(out.end(), width - n, 0);
 }
 
+// The only frequencies at which MeshCore lets an app turn repeat on
+// (repeat_freq_ranges in its companion), in kHz as the command carries them.
+// It is a check on the app, as it is in MeshCore: a repeat written into the
+// settings file by hand is not held to these.
+constexpr uint32_t kRepeatFreqsKhz[] = {433000, 869495, 918000};
+
+// MeshCore's companion clamps the airtime factor to 0-9 when it loads its
+// preferences. The wire carries it in thousandths.
+constexpr uint32_t kMaxAirtimeFactorMilli = 9000;
+
+// The values below go to the config as the text a line of the settings file
+// would hold, so each is spelled out exactly rather than through a double.
+std::string mhz_from_khz(uint32_t khz) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u.%03u", khz / 1000, khz % 1000);
+    return buf;
+}
+
+std::string degrees_from_e6(int32_t e6) {
+    const long long v = e6;
+    const long long magnitude = v < 0 ? -v : v;
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%s%lld.%06lld", v < 0 ? "-" : "", magnitude / 1000000,
+             magnitude % 1000000);
+    return buf;
+}
+
+std::string exact(double v) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.17g", v);
+    return buf;
+}
+
 }  // namespace
 
 Session::Session(const Clock& clock, Server& server, mesh::Node& node,
                  mesh::ContactStore& contacts, mesh::ChannelStore& channels, radio::Radio& radio,
-                 mesh::StateWriter& state, const DeviceMetrics& metrics)
+                 mesh::StateWriter& state, const DeviceMetrics& metrics, Settings& settings)
     : clock_(clock),
       server_(server),
       node_(node),
@@ -51,7 +87,8 @@ Session::Session(const Clock& clock, Server& server, mesh::Node& node,
       channels_(channels),
       radio_(radio),
       state_(state),
-      metrics_(metrics) {}
+      metrics_(metrics),
+      settings_(settings) {}
 
 void Session::attach() {
     server_.set_frame_handler([this](ByteView f) { handle_frame(f); });
@@ -66,6 +103,15 @@ Bytes Session::saved_reply() {
     // is the trade the app wants: it syncs contacts one at a time, and each
     // synchronous save was a full rewrite plus two fsyncs.
     return state_.healthy() ? resp_ok() : resp_err(kErrFileIoError);
+}
+
+Bytes Session::settings_reply(std::vector<Settings::Change> changes) {
+    switch (settings_.set(changes)) {
+        case Settings::Result::Ok: return resp_ok();
+        case Settings::Result::Invalid: return resp_err(kErrIllegalArg);
+        case Settings::Result::IoError: return resp_err(kErrFileIoError);
+    }
+    return resp_err(kErrBadState);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,12 +180,9 @@ void Session::handle_frame(ByteView frame) {
         case kCmdSetChannel: out = cmd_set_channel(args); break;
         case kCmdGetBatteryVoltage: out = cmd_get_battery(args); break;
         case kCmdSetRadioParams: out = cmd_set_radio_params(args); break;
-        case kCmdSetRadioTxPower:
-            // Changing TX power needs a radio re-init; accept and ignore rather
-            // than fail, so the app's settings screen still works.
-            LOG_INFO("companion: ignoring TX power change (set it in the config file)");
-            out = resp_ok();
-            break;
+        case kCmdSetRadioTxPower: out = cmd_set_tx_power(args); break;
+        case kCmdSetTuningParams: out = cmd_set_tuning_params(args); break;
+        case kCmdGetTuningParams: out = cmd_get_tuning_params(args); break;
         case kCmdHasConnection: out = resp_ok(server_.connected() ? 1 : 0); break;
         case kCmdLogout: out = resp_ok(); break;
         case kCmdReboot:
@@ -174,16 +217,18 @@ Bytes Session::self_info_frame() const {
     Bytes out {kRespSelfInfo};
     out.push_back(cfg.adv_type);
     out.push_back(static_cast<uint8_t>(rp.tx_power_dbm));
-    out.push_back(static_cast<uint8_t>(30));  // max tx power the SX1262 PA allows
+    out.push_back(static_cast<uint8_t>(radio::kMaxTxPowerDbm));
     put_bytes(out, node_.self().pub());
-    put_i32(out, cfg.has_location ? cfg.lat_e6 : 0);
-    put_i32(out, cfg.has_location ? cfg.lon_e6 : 0);
+    put_i32(out, cfg.lat_e6);
+    put_i32(out, cfg.lon_e6);
     out.push_back(0);  // multi-acks
     out.push_back(0);  // advert location policy
     out.push_back(0);  // telemetry mode
     out.push_back(0);  // manual add contacts
-    put_u32(out, static_cast<uint32_t>(rp.freq_mhz * 1000.0));
-    put_u32(out, static_cast<uint32_t>(rp.bw_khz * 1000.0));
+    // Rounded, not truncated: 869.525 is a hair under itself in binary, and
+    // would otherwise come back to the app as 869.524.
+    put_u32(out, static_cast<uint32_t>(std::lround(rp.freq_mhz * 1000.0)));
+    put_u32(out, static_cast<uint32_t>(std::lround(rp.bw_khz * 1000.0)));
     out.push_back(rp.sf);
     out.push_back(rp.cr);
     put_str(out, cfg.name);
@@ -199,6 +244,12 @@ Bytes Session::cmd_device_query(ByteView args) {
     put_padded(out, to_bytes(info.firmware_build), 12);
     put_padded(out, to_bytes(info.model), 40);
     put_padded(out, to_bytes(info.version), 20);
+    // MeshCore's v9 and v10 bytes, past the version we claim. A client that
+    // parses by version stops before them, but SET_RADIO_PARAMS without its
+    // repeat byte turns repeat off, so a client keeping it on has to be able
+    // to read it from somewhere.
+    out.push_back(node_.config().repeat ? 1 : 0);
+    out.push_back(0);  // path hash mode: one-byte hashes
     return out;
 }
 
@@ -471,17 +522,27 @@ Bytes Session::cmd_set_channel(ByteView args) {
     return saved_reply();
 }
 
-// The advert name and location come from the config file. Accepting them here
-// would change only the in-memory copy, so the edit would revert on the next
-// restart with nothing to tell the app it had been lost.
 Bytes Session::cmd_set_advert_name(ByteView args) {
-    LOG_INFO("companion: advert name change refused (set [node] advert_name in the config file)");
-    return Bytes {kRespDisabled};
+    // The rest of the frame, as MeshCore reads it; one that stops at a NUL is
+    // that long. MeshCore cuts a long name to fit its buffer, but a cut name is
+    // one nobody chose, so here one that does not fit the advert is refused.
+    std::string name = to_string(args);
+    name.resize(std::min(name.find('\0'), name.size()));
+    if (name.empty()) return resp_err(kErrIllegalArg);
+    return settings_reply({{"node.advert_name", name}});
 }
 
 Bytes Session::cmd_set_advert_latlon(ByteView args) {
-    LOG_INFO("companion: advert location change refused (set lat and lon in the config file)");
-    return Bytes {kRespDisabled};
+    // lat(4) lon(4) [alt(4)], in millionths of a degree. MeshCore reads the
+    // altitude for later and does nothing with it, and neither does this.
+    Reader r(args);
+    const int32_t lat = r.i32();
+    const int32_t lon = r.i32();
+    if (!r.ok()) return resp_err(kErrIllegalArg);
+    return settings_reply({
+        {"node.lat", degrees_from_e6(lat)},
+        {"node.lon", degrees_from_e6(lon)},
+    });
 }
 
 Bytes Session::cmd_get_battery(ByteView args) {
@@ -495,10 +556,79 @@ Bytes Session::cmd_get_battery(ByteView args) {
 }
 
 Bytes Session::cmd_set_radio_params(ByteView args) {
-    // Radio parameters come from the config file and require re-initialising
-    // the SX1262; accepting them here would silently do nothing.
-    LOG_INFO("companion: radio parameter change refused (set them in the config file)");
-    return Bytes {kRespDisabled};
+    // freq(4) in kHz, bw(4) in Hz, sf(1), cr(1), and from protocol v9 repeat(1).
+    Reader r(args);
+    const uint32_t freq_khz = r.u32();
+    const uint32_t bw_hz = r.u32();
+    const uint8_t sf = r.u8();
+    const uint8_t cr = r.u8();
+    if (!r.ok()) return resp_err(kErrIllegalArg);
+    // Absent means off, as it does to MeshCore — even though we claim v3, and
+    // a v3 client has no reason to send it. DEVICE_INFO reports the current
+    // state for a client that means to keep it.
+    const bool repeat = r.has(1) && r.u8() != 0;
+
+    if (repeat && std::find(std::begin(kRepeatFreqsKhz), std::end(kRepeatFreqsKhz), freq_khz) ==
+                      std::end(kRepeatFreqsKhz)) {
+        LOG_INFO("companion: repeat refused at %s MHz — an app may turn it on only at 433.000, "
+                 "869.495 or 918.000, as MeshCore allows",
+                 mhz_from_khz(freq_khz).c_str());
+        return resp_err(kErrIllegalArg);
+    }
+    // The config takes 0 as no frequency at all, which is not what an app
+    // setting one means.
+    if (freq_khz == 0) return resp_err(kErrIllegalArg);
+    const auto bw = radio::nearest_bandwidth(bw_hz / 1000.0);
+    if (!bw) {
+        LOG_INFO("companion: no SX1262 bandwidth near %u Hz", bw_hz);
+        return resp_err(kErrIllegalArg);
+    }
+
+    return settings_reply({
+        {"radio.lora_freq", mhz_from_khz(freq_khz)},
+        {"radio.lora_bw", exact(*bw)},
+        {"radio.lora_sf", std::to_string(sf)},
+        {"radio.lora_cr", std::to_string(cr)},
+        {"node.repeat", repeat ? "1" : "0"},
+    });
+}
+
+Bytes Session::cmd_set_tx_power(ByteView args) {
+    // A signed byte, as MeshCore reads it. meshcore-cli sends a 32-bit
+    // integer, and this is its low byte.
+    Reader r(args);
+    const int8_t dbm = static_cast<int8_t>(r.u8());
+    if (!r.ok()) return resp_err(kErrIllegalArg);
+    return settings_reply({{"radio.lora_tx_power", std::to_string(dbm)}});
+}
+
+Bytes Session::cmd_set_tuning_params(ByteView args) {
+    // rx_delay(4) airtime_factor(4), each in thousandths.
+    Reader r(args);
+    const uint32_t rx_delay = r.u32();
+    const uint32_t af = r.u32();
+    if (!r.ok()) return resp_err(kErrIllegalArg);
+    // MeshCore holds a received flood packet back before acting on it, the
+    // longer the weaker it was heard, so that a better copy can overtake it.
+    // Nothing here does, and accepting a delay would claim otherwise.
+    if (rx_delay != 0) {
+        LOG_INFO("companion: RX delay refused — not implemented, so only 0 is accepted");
+        return resp_err(kErrIllegalArg);
+    }
+    if (af > kMaxAirtimeFactorMilli) return resp_err(kErrIllegalArg);
+    // The factor is how long MeshCore keeps quiet after a transmission, as a
+    // multiple of its airtime, which comes to a duty cycle of 1 / (1 + af).
+    return settings_reply({{"radio.duty_cycle", exact(100.0 / (1.0 + af / 1000.0))}});
+}
+
+Bytes Session::cmd_get_tuning_params(ByteView args) {
+    Bytes out {kRespTuningParams};
+    put_u32(out, 0);  // RX delay: not implemented
+    // A duty cycle written into the settings file by hand need not be one an
+    // airtime factor makes, and is reported as the factor nearest to it.
+    const double af = 100.0 / radio_.params().duty_cycle_pct - 1.0;
+    put_u32(out, static_cast<uint32_t>(std::lround(af * 1000.0)));
+    return out;
 }
 
 // ---------------------------------------------------------------------------

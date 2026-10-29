@@ -11,8 +11,9 @@ configuration first:
 
     sudoedit /etc/coreletd/coreletd.ini
 
-`lora_freq` in `[radio]` is required and has no built-in default; the shipped
-file leaves it unset. Set the plan for your region, fit an antenna, then:
+There is no default frequency: the daemon starts with the radio idle, and
+transmits nothing until a companion app sets the radio parameters (see
+"Settings from the app" below). Fit an antenna, then:
 
     sudo systemctl enable --now coreletd
     journalctl -u coreletd -f
@@ -66,7 +67,8 @@ to discard the node identity:
 
 Everything in /var/lib/coreletd is private to the `coreletd` user: the
 directory is 0700 and every file in it 0600 -- the identity, the channel
-secrets in `channels`, and messages waiting for an app in `messages`.
+secrets in `channels`, messages waiting for an app in `messages`, and the
+radio and node settings in `settings`.
 Membership of the `coreletd` group grants the socket and the radio, not the
 state, so read or back it up with sudo.
 
@@ -87,6 +89,33 @@ restored files at its next save, and leave the files owned by `coreletd`:
 If the identity is missing while the other files are present, the daemon
 refuses to start rather than generate a new node on top of them.
 
+Settings from the app
+---------------------
+
+As on a MeshCore radio, a companion app sets the radio preset, TX power,
+duty cycle, the node's name and position, and repeat, and none of them is in
+/etc/coreletd/coreletd.ini. The daemon applies each change at once and keeps
+it in /var/lib/coreletd/settings, with the node's other state.
+
+Without an app, write that file yourself with the service stopped. It takes
+the configuration file's syntax and holds only what has been set; README.md
+in /usr/share/doc/coreletd lists the keys and their defaults:
+
+    sudo systemctl stop coreletd
+    sudoedit -u coreletd /var/lib/coreletd/settings
+    sudo systemctl start coreletd
+
+For example:
+
+    [radio]
+    lora_freq = 869.618
+
+    [node]
+    advert_name = Field unit
+
+A value the daemon cannot take stops it at startup, and the journal says
+which.
+
 Companion protocol access
 -------------------------
 
@@ -98,6 +127,7 @@ local client's user to the coreletd group, then log out and back in:
 
 Set `companion_interface = tcp` for TCP-only clients. Selecting TCP is the
 explicit network opt-in; it defaults to 127.0.0.1. Prefer an SSH tunnel or
-WireGuard to widening `companion_bind` for direct network exposure.
+WireGuard to widening `companion_bind` for direct network exposure: whoever
+can reach the protocol can retune the radio.
 
  -- Denis Yantarev <denis.yantarev@gmail.com>, Wed, 12 Aug 2026 14:40:00 +0000

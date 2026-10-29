@@ -73,6 +73,7 @@ public:
     bool tx_busy() const override { return false; }
     const radio::RadioParams& params() const override { return params_; }
     std::string describe() const override { return "params-only"; }
+    void reconfigure(const radio::RadioParams& p) override { params_ = p; }
 
 private:
     radio::RadioParams params_;

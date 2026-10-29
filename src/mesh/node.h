@@ -20,11 +20,16 @@ namespace clt::mesh {
 class Node {
 public:
     struct Config {
-        std::string name = "coreletd";
+        // Empty is an advert without a name, which MeshCore clients ignore.
+        // The daemon never leaves it so: App names a node nobody has named
+        // after its key, as MeshCore does.
+        std::string name;
         uint8_t adv_type = proto::kAdvTypeChat;
-        bool has_location = false;
+        // 0,0 is how MeshCore says "no position", not a point in the Gulf of
+        // Guinea.
         int32_t lat_e6 = 0;
         int32_t lon_e6 = 0;
+        bool has_location() const { return lat_e6 != 0 || lon_e6 != 0; }
         // 0 disables automatic adverts; MeshCore nodes typically re-advertise
         // every few hours so the mesh keeps fresh routes.
         uint32_t advert_interval_s = 0;
@@ -59,9 +64,16 @@ public:
     void start();
     void set_delegate(Delegate* d) { delegate_ = d; }
 
-    // Read-only: the config is loaded once at startup, and the companion
-    // protocol refuses the commands that would edit it at runtime.
     const Config& config() const { return cfg_; }
+
+    // What an app may change while the node runs. Nothing is advertised on a
+    // change, as MeshCore advertises nothing: the next advert carries it.
+    void set_name(std::string name) { cfg_.name = std::move(name); }
+    void set_location(int32_t lat_e6, int32_t lon_e6) {
+        cfg_.lat_e6 = lat_e6;
+        cfg_.lon_e6 = lon_e6;
+    }
+    void set_repeat(bool repeat) { cfg_.repeat = repeat; }
     const crypto::LocalIdentity& self() const { return self_; }
 
     // --- outbound -------------------------------------------------------

@@ -52,19 +52,36 @@ Settings are grouped into
 .BR [storage]
 and
 .B [logging]
-sections.
+sections. The installed configuration file documents every option.
 .PP
-.B lora_freq
-in
-.B [radio]
-is required and has no default: which band you may transmit on is a legal
-question, not a technical one. The daemon refuses to start without it. Every
-node on a mesh must agree on
+What a MeshCore radio lets its companion app change is not in the
+configuration file: the radio preset, the TX power, the duty cycle, the node's
+name and position, and repeat. A companion app sets them, as it would on a
+MeshCore radio, and each change is applied at once and kept in
+.IR /var/lib/coreletd/settings .
+There is no default frequency: which band you may transmit on is a legal
+question, not a technical one. Until an app names one the radio is idle and
+nothing is transmitted.
+.PP
+Without an app, write the settings file by hand while the daemon is stopped.
+It takes the configuration file's syntax and holds only what has been set:
+.BR lora_freq ,
 .BR lora_bw ,
-.B lora_sf
+.BR lora_sf ,
+.BR lora_cr ,
+.B lora_tx_power
 and
-.BR lora_cr .
-The installed configuration file documents every option.
+.B duty_cycle
+in
+.BR [radio] ;
+.BR advert_name ,
+.BR lat ,
+.B lon
+and
+.B repeat
+in
+.BR [node] .
+A value the daemon cannot take stops it at startup.
 .PP
 .B companion_interface
 in
@@ -120,9 +137,12 @@ present, the daemon refuses to start rather than generate a new one.
 .I /var/lib/coreletd/channels
 .TQ
 .I /var/lib/coreletd/messages
-Learned contacts, configured channels with their secrets, and received messages
-waiting for an app. Like the identity, each is mode 0600 in a directory of mode
-0700: the service group grants the socket, not the state.
+.TQ
+.I /var/lib/coreletd/settings
+Learned contacts, configured channels with their secrets, received messages
+waiting for an app, and the radio and node settings. Like the identity, each is
+mode 0600 in a directory of mode 0700: the service group grants the socket, not
+the state.
 .TP
 .I /run/coreletd/companion.sock
 Default companion endpoint, owned by the service user and group with mode 0660.
@@ -138,10 +158,11 @@ socket limits access to members of the
 .B coreletd
 group. TCP defaults to 127.0.0.1; selecting the TCP interface permits any
 configured bind address. Prefer an SSH tunnel or WireGuard to exposing it
-directly.
+directly. Whoever can reach it can also retune the radio, its frequency and
+power included.
 .SH EXIT STATUS
 Returns 0 on a clean shutdown after SIGINT or SIGTERM, 1 if the configuration
-cannot be loaded or the radio cannot be brought up, and 2 for a usage error.
+or the settings cannot be loaded or the radio cannot be brought up, and 2 for a usage error.
 .SH SEE ALSO
 .BR systemctl (1),
 .BR journalctl (1),

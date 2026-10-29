@@ -5,6 +5,12 @@
 
 namespace clt::radio {
 
+std::optional<double> nearest_bandwidth(double khz) {
+    for (double supported : kBandwidthsKhz)
+        if (std::fabs(khz - supported) <= supported * 0.01) return supported;
+    return std::nullopt;
+}
+
 uint32_t Radio::airtime_ms(size_t bytes) const {
     const RadioParams& p = params();
     if (p.sf < 5 || p.bw_khz <= 0) return 0;

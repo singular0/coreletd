@@ -1,9 +1,11 @@
 #include "daemon/config.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <iterator>
 #include <limits>
 #include <variant>
 
@@ -20,22 +22,21 @@ namespace {
 // the requirement text quoted back in the error message.
 
 bool valid_freq(double mhz) {
-    // 0 means "not set" here; whether that is allowed depends on the radio
-    // backend, so load() decides after the whole file is read.
+    // 0 is "not set": the daemon starts with the radio idle and transmits
+    // nothing until an app names a frequency. The range is what the SX1262 can
+    // tune, checked on the centre frequency alone, as MeshCore checks it.
     return mhz == 0.0 || (mhz >= 150.0 && mhz <= 960.0);
 }
 
 bool supported_bandwidth(double khz) {
-    static constexpr std::array<double, 10> kBandwidths = {
-        7.81, 10.42, 15.63, 20.83, 31.25, 41.67, 62.5, 125.0, 250.0, 500.0,
-    };
-    return std::any_of(kBandwidths.begin(), kBandwidths.end(),
+    return std::any_of(radio::kBandwidthsKhz.begin(), radio::kBandwidthsKhz.end(),
                        [khz](double supported) { return std::fabs(khz - supported) < 0.005; });
 }
 
 bool valid_tcxo(double volts) { return volts == 0.0 || (volts >= 1.6 && volts <= 3.3); }
 
-bool valid_duty_cycle(double pct) { return pct > 0.0 && pct < 100.0; }
+// 100 is no limit, which is what an app asks for with an airtime factor of 0.
+bool valid_duty_cycle(double pct) { return pct > 0.0 && pct <= 100.0; }
 
 bool valid_lat(double deg) { return deg >= -90.0 && deg <= 90.0; }
 
@@ -85,11 +86,20 @@ struct RealTarget {
     std::string_view requirement;
 };
 
+// A position: written in decimal degrees, held in the millionths the advert
+// carries.
+struct DegreesTarget {
+    int32_t* field;
+    bool (*valid)(double);
+    std::string_view requirement;
+};
+
 // One recognised key and where its value goes. The field's current value is the
-// default, so defaults stay in config.h beside the fields they belong to.
+// default, so defaults stay in config.h beside the fields they belong to — and
+// for the keys an app may change, the defaults are all there is until it does.
 struct Setting {
     std::string_view key;
-    std::variant<StrTarget, BoolTarget, IntTarget, RealTarget> target;
+    std::variant<StrTarget, BoolTarget, IntTarget, RealTarget, DegreesTarget> target;
 };
 
 Setting Str(std::string_view key, std::string& field) {
@@ -110,20 +120,31 @@ Setting Real(std::string_view key, double& field, bool (*valid)(double),
     return {key, RealTarget {&field, valid, requirement}};
 }
 
-// The two settings that no single field can hold: a log level arrives as a
-// name, and a position arrives as two degrees values that become one
-// fixed-point pair. load() converts both once the table has been read.
+Setting Degrees(std::string_view key, int32_t& field, bool (*valid)(double),
+                std::string_view requirement) {
+    return {key, DegreesTarget {&field, valid, requirement}};
+}
+
+// The two settings that arrive as names of enum values. load() converts both
+// once the table has been read.
 struct Raw {
     std::string log_level = "info";
     std::string companion_interface = "unix";
-    double lat = 0.0;
-    double lon = 0.0;
 };
 
-// Every key the daemon understands, bound to the fields of `cfg`. Config::keys()
-// builds this against a throwaway Config, so a setting cannot exist without
-// being listed here for the unknown-key warning and for the shipped
-// coreletd.ini, which the tests check against this same list.
+// What MeshCore's companion keeps in its own preferences and lets an app
+// change: the node's name and position, the radio preset, the TX power, the
+// airtime budget and repeat. These live in the settings file and nowhere else,
+// so each has one owner; everything else is the operator's, in the config file.
+constexpr std::string_view kAppKeys[] = {
+    "radio.lora_freq",  "radio.lora_bw", "radio.lora_sf", "radio.lora_cr", "radio.lora_tx_power",
+    "radio.duty_cycle", "node.advert_name", "node.lat", "node.lon", "node.repeat",
+};
+
+// Every key the daemon understands, in either file, bound to the fields of
+// `cfg`. Config::keys() builds this against a throwaway Config, so a setting
+// cannot exist without being listed here for the unknown-key warning and for
+// the shipped coreletd.ini, which the tests check against this same list.
 std::vector<Setting> settings(Config& cfg, Raw& raw) {
     constexpr int64_t kMaxInt = std::numeric_limits<int>::max();
     constexpr int64_t kMaxU8 = std::numeric_limits<uint8_t>::max();
@@ -140,7 +161,8 @@ std::vector<Setting> settings(Config& cfg, Raw& raw) {
              "a bandwidth supported by SX1262 (7.81 to 500 kHz)"),
         Int("radio.lora_sf", cfg.radio.sf, 5, 12),
         Int("radio.lora_cr", cfg.radio.cr, 5, 8),
-        Int("radio.lora_tx_power", cfg.radio.tx_power_dbm, -9, 22),
+        Int("radio.lora_tx_power", cfg.radio.tx_power_dbm, radio::kMinTxPowerDbm,
+            radio::kMaxTxPowerDbm),
         // 0 is "derive it from the spreading factor", which is what MeshCore
         // does; a value is an override for a mesh that agreed on another.
         Int("radio.lora_preamble", cfg.radio.preamble, 0, kMaxU16),
@@ -169,8 +191,8 @@ std::vector<Setting> settings(Config& cfg, Raw& raw) {
         // --- node ---
         Str("node.advert_name", cfg.node.name),
         Int("node.advert_interval", cfg.node.advert_interval_s, 0, kMaxTimerDelaySeconds),
-        Real("node.lat", raw.lat, valid_lat, "between -90 and 90 degrees"),
-        Real("node.lon", raw.lon, valid_lon, "between -180 and 180 degrees"),
+        Degrees("node.lat", cfg.node.lat_e6, valid_lat, "between -90 and 90 degrees"),
+        Degrees("node.lon", cfg.node.lon_e6, valid_lon, "between -180 and 180 degrees"),
         Bool("node.repeat", cfg.node.repeat),
         Int("node.max_hops", cfg.node.max_hops, 0, proto::kMaxPathSize),
 
@@ -216,20 +238,53 @@ bool apply(const Ini& ini, const Setting& s, std::string& error) {
             return false;
         }
         num->field.set(value);
-    } else {
-        const auto& real = std::get<RealTarget>(s.target);
-        double value = ini.get_double(s.key, *real.field, ok);
+    } else if (const auto* real = std::get_if<RealTarget>(&s.target)) {
+        double value = ini.get_double(s.key, *real->field, ok);
         if (!ok || !std::isfinite(value)) {
             error = key + ": not a finite number";
             return false;
         }
-        if (!real.valid(value)) {
-            error = key + " must be " + std::string(real.requirement);
+        if (!real->valid(value)) {
+            error = key + " must be " + std::string(real->requirement);
             return false;
         }
-        *real.field = value;
+        *real->field = value;
+    } else {
+        const auto& deg = std::get<DegreesTarget>(s.target);
+        double value = ini.get_double(s.key, *deg.field / 1e6, ok);
+        if (!ok || !std::isfinite(value)) {
+            error = key + ": not a finite number";
+            return false;
+        }
+        if (!deg.valid(value)) {
+            error = key + " must be " + std::string(deg.requirement);
+            return false;
+        }
+        *deg.field = static_cast<int32_t>(std::llround(value * 1e6));
     }
     return true;
+}
+
+// The fewest decimals that read back as exactly `v`, so 869.618 is written as
+// that rather than as the binary fraction nearest to it, and 100 as 100 rather
+// than 1e+02. Every value the table holds is in range of a fixed point.
+std::string format_real(double v) {
+    char buf[64];
+    for (int decimals = 0; decimals <= 17; decimals++) {
+        snprintf(buf, sizeof(buf), "%.*f", decimals, v);
+        if (std::strtod(buf, nullptr) == v) return buf;
+    }
+    snprintf(buf, sizeof(buf), "%.17g", v);
+    return buf;
+}
+
+std::string format(const Setting& s) {
+    if (const auto* text = std::get_if<StrTarget>(&s.target)) return *text->field;
+    if (const auto* flag = std::get_if<BoolTarget>(&s.target)) return *flag->field ? "1" : "0";
+    if (const auto* num = std::get_if<IntTarget>(&s.target))
+        return std::to_string(num->field.get());
+    if (const auto* real = std::get_if<RealTarget>(&s.target)) return format_real(*real->field);
+    return format_real(*std::get<DegreesTarget>(s.target).field / 1e6);
 }
 
 }  // namespace
@@ -240,7 +295,7 @@ bool Config::load(const std::string& path, std::string& error) {
 
     Raw raw;
     for (const Setting& s : settings(*this, raw))
-        if (!apply(ini, s, error)) return false;
+        if (!app_key(s.key) && !apply(ini, s, error)) return false;
 
     if (!log_parse_level(raw.log_level, log_level)) {
         error = "logging.log_level: unknown level \"" + raw.log_level + "\"";
@@ -253,13 +308,6 @@ bool Config::load(const std::string& path, std::string& error) {
         companion.transport = clt::companion::Server::Transport::Tcp;
     } else {
         error = "companion.companion_interface must be \"unix\" or \"tcp\"";
-        return false;
-    }
-
-    if (radio.freq_mhz <= 0) {
-        error =
-            "radio.lora_freq is required — set the frequency for your region "
-            "(e.g. 869.618 for EU868, 910.525 for US915)";
         return false;
     }
 
@@ -277,21 +325,24 @@ bool Config::load(const std::string& path, std::string& error) {
     }
     while (state_dir.size() > 1 && state_dir.back() == '/') state_dir.pop_back();
 
-    // 0,0 is how the file says "no position", not a point in the Gulf of Guinea.
-    node.has_location = raw.lat != 0.0 || raw.lon != 0.0;
-    node.lat_e6 = 0;
-    node.lon_e6 = 0;
-    if (node.has_location) {
-        node.lat_e6 = static_cast<int32_t>(std::llround(raw.lat * 1000000.0));
-        node.lon_e6 = static_cast<int32_t>(std::llround(raw.lon * 1000000.0));
+    for (const auto& key : ini.unread_keys()) {
+        if (app_key(key))
+            LOG_WARN("config: %s ignored — it is set from a companion app, or in %s",
+                     key.c_str(), settings_path().c_str());
+        else
+            LOG_WARN("config: unknown key \"%s\" ignored", key.c_str());
     }
 
+    return true;
+}
+
+bool Config::validate(std::string& error) const {
     // The advert has to fit in the 32 bytes MeshCore verifies, and the budget
     // depends on whether a position is being advertised, so this cannot be a
     // range on the setting itself. Refuse rather than truncate: the failure
     // mode otherwise is silence at both ends — peers log a forged signature and
     // drop us, and nothing here says why nobody ever answers.
-    // Not reachable from the file — an empty value falls back to the default —
+    // Not reachable from a file — an empty value falls back to the default —
     // but the invariant is worth holding anyway: BaseChatMesh::onAdvertRecv
     // discards any advert without a name, so a nameless node is invisible to
     // chat clients even when its signature verifies.
@@ -299,21 +350,22 @@ bool Config::load(const std::string& path, std::string& error) {
         error = "node.advert_name must not be empty — MeshCore clients ignore adverts with no name";
         return false;
     }
-    {
-        const size_t overhead = 1 + (node.has_location ? 8 : 0);  // flags, lat+lon
-        const size_t budget = proto::kMaxAdvertAppDataSize - overhead;
-        if (node.name.size() > budget) {
-            error = "node.advert_name is " + std::to_string(node.name.size()) +
-                    " bytes; the advert only carries " + std::to_string(budget) +
-                    (node.has_location ? " once node.lat/node.lon are set" : "") +
-                    ", and a longer one fails signature verification on every MeshCore node";
-            return false;
-        }
+    // Only an app can send one, and no client shows it as anything but
+    // garbage; a line break would also end the value in the settings file.
+    if (std::any_of(node.name.begin(), node.name.end(),
+                    [](unsigned char c) { return c < 0x20 || c == 0x7f; })) {
+        error = "node.advert_name must not contain control characters";
+        return false;
     }
-
-    for (const auto& key : ini.unread_keys())
-        LOG_WARN("config: unknown key \"%s\" ignored", key.c_str());
-
+    const size_t overhead = 1 + (node.has_location() ? 8 : 0);  // flags, lat+lon
+    const size_t budget = proto::kMaxAdvertAppDataSize - overhead;
+    if (node.name.size() > budget) {
+        error = "node.advert_name is " + std::to_string(node.name.size()) +
+                " bytes; the advert only carries " + std::to_string(budget) +
+                (node.has_location() ? " once node.lat/node.lon are set" : "") +
+                ", and a longer one fails signature verification on every MeshCore node";
+        return false;
+    }
     return true;
 }
 
@@ -321,8 +373,42 @@ std::vector<std::string_view> Config::keys() {
     Config cfg;
     Raw raw;
     std::vector<std::string_view> out;
-    for (const Setting& s : settings(cfg, raw)) out.push_back(s.key);
+    for (const Setting& s : settings(cfg, raw))
+        if (!app_key(s.key)) out.push_back(s.key);
     return out;
+}
+
+bool Config::app_key(std::string_view key) {
+    return std::find(std::begin(kAppKeys), std::end(kAppKeys), key) != std::end(kAppKeys);
+}
+
+std::vector<std::string_view> Config::app_keys() {
+    return {std::begin(kAppKeys), std::end(kAppKeys)};
+}
+
+std::string Config::get(std::string_view key) const {
+    if (!app_key(key)) return {};
+    // The table binds to fields it may write, so it is built over a copy.
+    Config copy = *this;
+    Raw raw;
+    for (const Setting& s : settings(copy, raw))
+        if (s.key == key) return format(s);
+    return {};
+}
+
+bool Config::set(std::string_view key, std::string_view value, std::string& error) {
+    if (!app_key(key)) {
+        error = std::string(key) + " is not a setting an app may change";
+        return false;
+    }
+    // A one-line file, so the value meets exactly the parsing and the checks
+    // it would on its own line in the settings file.
+    Ini line;
+    line.set(std::string(key), std::string(value));
+    Raw raw;
+    for (const Setting& s : settings(*this, raw))
+        if (s.key == key) return apply(line, s, error);
+    return false;
 }
 
 void Config::finalise() {

@@ -54,12 +54,10 @@ Unchecked boxes are not implemented — use different firmware for those.
 - [x] Optional TCP, bound to loopback by default.
 - [x] One app at a time, as the protocol assumes. A new connection takes over from the old one, so
       a client that died without closing its socket cannot lock you out.
+- [x] Settings from the app, as on a MeshCore radio: the node's name and position, the radio preset,
+      TX power, the airtime budget and repeat, applied at once and kept with the node's state.
 - Bluetooth LE and USB-serial are **not planned**. They are how you reach a microcontroller; this
   runs on a Linux box that already has a network stack.
-
-Radio settings, node name and position come from the configuration file, and the daemon **refuses**
-the app's commands that would change them rather than accepting a change that nothing would persist.
-Edit the file and restart.
 
 **Operationally**
 
@@ -196,19 +194,58 @@ sudoedit /etc/coreletd/coreletd.ini
 ```
 
 The file is divided into `[radio]`, `[hardware]`, `[node]`, `[companion]`, `[storage]`, and
-`[logging]` sections. **`lora_freq` in `[radio]` is required and has no default.** Which band you may
-transmit on is a legal question, not a technical one, so the daemon refuses to start until you
-answer it — `869.618` for EU868, `910.525` for US915. Every node on a mesh must also agree on
-`lora_bw` and `lora_sf`; the shipped values are MeshCore's standard settings. `lora_cr` is carried in
-each packet's header, so it only costs airtime rather than breaking the link.
+`[logging]` sections, and says how the daemon runs on this machine: the board's wiring, where apps
+connect, where the node's state lives, how much it logs. The shipped values fit a uConsole with an
+AIO v2, and the file documents every option.
 
-`state_dir` in `[storage]` is the other setting with no default, but the shipped file already names
+`state_dir` in `[storage]` is the one setting with no default, but the shipped file already names
 `/var/lib/coreletd`, the directory systemd creates for the service. Leave it unless you run the
 daemon some other way; it must be an absolute path to a directory that exists.
 
-Worth setting while you are in there: `advert_name` in `[node]` (what other nodes see), `lat` / `lon`
-if you want to publish a position, and `duty_cycle` in `[radio]` for your band. The file documents
-every option.
+### Radio and node settings
+
+What a MeshCore radio lets its app change is not in that file: the radio preset, the TX power, the
+airtime budget, the node's name and position, and repeat. As on a MeshCore radio, your companion app
+sets them — meshcore-cli's `set radio 869.618,62.5,8,5`, for one — and the daemon applies each
+change at once and keeps it in `/var/lib/coreletd/settings`.
+
+**There is no default frequency.** Which band you may transmit on is a legal question, not a
+technical one, so nothing picks it for you. Until your app chooses a preset, the daemon runs with
+the radio silent, the way a new MeshCore radio waits for its app. Every node on a mesh must agree on
+the frequency, bandwidth and spreading factor; the coding rate is carried in each packet's header,
+so a different one only costs airtime.
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `[radio] lora_freq` | none | MHz, 150 to 960: `869.618` for EU868, `910.525` for US915 |
+| `[radio] lora_bw` | `62.5` | kHz, one the SX1262 has, 7.81 to 500 |
+| `[radio] lora_sf` | `8` | 5 to 12 |
+| `[radio] lora_cr` | `5` | 5 to 8, for 4/5 to 4/8 |
+| `[radio] lora_tx_power` | `22` | dBm, −9 to 22 |
+| `[radio] duty_cycle` | `10` | Percent of each rolling hour, up to 100 for no limit. EU868 allows 1% in most sub-bands and 10% at 869.4–869.65 MHz. An app sets it as MeshCore's airtime factor, as 100 / (1 + factor). |
+| `[node] advert_name` | from the key | What other nodes see: at most 31 bytes, or 23 with a position. Unset, it is the first 4 bytes of the node's public key in hex, such as `4FD099CC`, as MeshCore names a new node. |
+| `[node] lat`, `lon` | `0` | Decimal degrees; both 0 publishes no position |
+| `[node] repeat` | `0` | Relay other nodes' traffic, as a MeshCore companion with repeat enabled does. It spends your airtime budget and battery on theirs. An app may turn it on only at 433.000, 869.495 or 918.000 MHz, as MeshCore allows. |
+
+Without an app, write the file yourself while the daemon is stopped, in the same syntax as the
+configuration file. It holds only what has been set, and the rest stay at their defaults:
+
+```sh
+sudo systemctl stop coreletd
+sudoedit -u coreletd /var/lib/coreletd/settings
+sudo systemctl start coreletd
+```
+
+```ini
+[radio]
+lora_freq = 869.618
+
+[node]
+advert_name = Field unit
+```
+
+A value out of range, or a name too long for the advert, stops the daemon at startup and the log
+says which, rather than have it guess at a frequency.
 
 ## Run
 
@@ -278,9 +315,9 @@ rest of the directory aside if a new node is what you want.
 
 ### Back up and restore
 
-Everything the node is lives in `/var/lib/coreletd`: `identity`, `contacts`, `channels`, and the
-`messages` waiting for an app. Each file is replaced atomically, so a copy taken while the daemon
-runs is never half-written — though it can trail by a second for anything you just changed, and by
+Everything the node is lives in `/var/lib/coreletd`: `identity`, `contacts`, `channels`, the
+`messages` waiting for an app, and its `settings`. Each file is replaced atomically, so a copy taken
+while the daemon runs is never half-written — though it can trail by a second for anything you just changed, and by
 a minute for when contacts were last heard:
 
 ```sh
@@ -304,7 +341,8 @@ sudo systemctl start coreletd
 
 The companion protocol has **no authentication of any kind**. The default Unix socket limits access
 to the `coreletd` user and group. If TCP is selected, anyone who can reach the port can read your
-messages and send messages as you; `companion_bind` therefore defaults to `127.0.0.1`.
+messages, send messages as you, and retune the radio — its frequency and power included;
+`companion_bind` therefore defaults to `127.0.0.1`.
 
 Selecting the TCP interface is the explicit opt-in to network service. Prefer keeping it on
 loopback and reaching it over an SSH tunnel or WireGuard instead of widening `companion_bind`:
@@ -326,8 +364,9 @@ it at power-up because it tries to start its oscillator before DIO3 is configure
 it is cleared after calibration. If it is *still* reported after that, `lora_tcxo` in `[hardware]`
 does not match your board.
 
-**The daemon starts but hears nothing.** Air settings must match the rest of the mesh exactly —
-frequency, bandwidth and spreading factor. A mismatch is silence, not an error. Coding rate is the
+**The daemon starts but hears nothing.** If the log says `no frequency set`, the radio is idle until
+your app sets the radio parameters. Otherwise, air settings must match the rest of the mesh exactly
+— frequency, bandwidth and spreading factor. A mismatch is silence, not an error. Coding rate is the
 exception: it rides in the packet header, so a node using a different one is still heard.
 
 **`EBUSY` opening the GPIO chip.** Something else holds the lines; usually `meshtasticd`, sometimes

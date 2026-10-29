@@ -107,6 +107,7 @@ add_library(coreletd_core STATIC
     src/daemon/config.cpp
     src/daemon/eventloop.cpp
     src/daemon/host_metrics.cpp
+    src/daemon/settings.cpp
     src/daemon/app.cpp
 )
 

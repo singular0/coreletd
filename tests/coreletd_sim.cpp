@@ -111,6 +111,9 @@ public:
     bool tx_busy() const override { return busy_; }
     const radio::RadioParams& params() const override { return params_; }
     std::string describe() const override { return "simulated radio"; }
+    // The peer hears whatever is sent, whatever it is sent on: the script
+    // asserts on what the client is told and leaves the air settings alone.
+    void reconfigure(const radio::RadioParams& params) override { params_ = params; }
 
     void set_heard_handler(Heard h) { heard_ = std::move(h); }
     void inject(Bytes data) {

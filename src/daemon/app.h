@@ -8,6 +8,7 @@
 #include "daemon/config.h"
 #include "daemon/eventloop.h"
 #include "daemon/host_metrics.h"
+#include "daemon/settings.h"
 #include "mesh/channels.h"
 #include "mesh/contacts.h"
 #include "mesh/dispatcher.h"
@@ -19,15 +20,16 @@
 namespace clt {
 
 // Owns every subsystem and wires them together. Construction order matters:
-// identity, then radio, then dispatcher, then node, then the state writer, then
-// the companion server.
+// identity, then the app's settings, then radio, then dispatcher, then node,
+// then the state writer, then the companion server.
 class App {
 public:
     // The radio and the clock are the two things the daemon builds for itself
     // and a test replaces. A null radio means the daemon constructs its
     // compiled-in backend; handing one in stands the whole stack up against a
-    // radio the test drives. The clock reaches every subsystem through the
-    // loop, so a ManualClock runs all of it on virtual time.
+    // radio the test drives, which start() gives the same parameters the
+    // backend would have been built with. The clock reaches every subsystem
+    // through the loop, so a ManualClock runs all of it on virtual time.
     explicit App(Config cfg, std::unique_ptr<radio::Radio> radio = nullptr,
                  Clock& clock = millis_clock());
     ~App();
@@ -53,6 +55,7 @@ private:
     // destruction, which they can only do while the loop is still alive.
     EventLoop loop_;
 
+    std::unique_ptr<SettingsStore> settings_;
     std::unique_ptr<crypto::LocalIdentity> identity_;
     std::unique_ptr<radio::Radio> radio_;
     std::unique_ptr<mesh::ContactStore> contacts_;

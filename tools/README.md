@@ -33,7 +33,9 @@ Every check asserts on both ends: what the client printed and what the peer deco
 A message typed into the client has to reach the peer with the same text, the peer's ack has to
 come back as a delivery receipt, and the peer's messages have to come out of the client's inbox
 intact — waiting ones, and one pushed while the client listens. Contacts, routes, channels,
-adverts, the contact card, the clock and the commands the daemon refuses are covered too.
+adverts, the contact card, the clock, the settings an app may change — name, position, TX power,
+radio parameters, and the repeat frequencies it may not — and the commands the daemon refuses are
+covered too.
 
 ```sh
 cmake --build build                       # builds coreletd_sim with the tests
@@ -42,9 +44,7 @@ tools/cli_compat_test.py --meshcli ~/venv/bin/meshcli --verbose
 tools/cli_compat_test.py --keep           # keep the daemon log and state
 ```
 
-It takes under a minute; fifteen seconds of that is meshcore-cli waiting out its own timeout on
-a refused name change, because it does not expect `RESP_DISABLED` there. meshcore-cli runs with
-`HOME` pointed at a scratch directory, so the init scripts and message log in its
+It takes under a minute. meshcore-cli runs with `HOME` pointed at a scratch directory, so the init scripts and message log in its
 `~/.config/meshcore` are neither run nor written. What this proves is the companion protocol as
 that client speaks it; whether real firmware accepts our packets is the next section's question.
 
@@ -85,13 +85,16 @@ tools/hw_e2e_test.py --with-relay         # also relay through coreletd (see bel
 
 The phases build on each other: `preflight` (tools, ssh, LoRa rail, peer on the same air
 settings) → `deploy` (rsync + cmake, and `--with-unit-tests` for ctest on the target) → `daemon`
-(generated `.ini`, start, wait for the SX1262, connect through the tunnel) → `companion` (the
+(a generated `.ini`, and the radio preset and name written into the state directory's `settings`
+as an app would leave them; start, wait for the SX1262, connect through the tunnel) → `companion` (the
 protocol surface) → `advert_tx` / `advert_rx` (a signed advert each way, and no route taken
 from the one we receive) → `message_rx` / `message_tx` (an encrypted direct message each way, each
 confirmed by the *other* node's ack; the peer's is sent once flooded and once direct, with the
 `PATH` exchange between them that gives each node its route to the other) → `path` (a reset route
-falls back to flood and is relearned from the reply) → `relay` (opt-in, below) → `channel` (a
-group message on a private channel, opt-in) → `restart` (state survives a stop and start).
+falls back to flood and is relearned from the reply) → `settings` (the coding rate changed over the
+companion socket and put back, the SX1262 retuned for each, then a message each way) → `relay`
+(opt-in, below) → `channel` (a group message on a private channel, opt-in) → `restart` (state
+survives a stop and start).
 
 Each phase establishes what it needs rather than assuming an earlier one ran, so `--only` works on
 any of them. That matters more than it sounds: contacts and channels are wiped at the start of

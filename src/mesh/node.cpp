@@ -124,7 +124,8 @@ bool Node::send_channel_text(size_t channel_index, const std::string& text, uint
     p.route = proto::RouteType::Flood;  // no route to a group
     p.payload = env.encode();
 
-    LOG_INFO("send: channel %zu (%s): %s", channel_index, ch->name.c_str(), text.c_str());
+    LOG_INFO("send: channel %zu (%s): %zu bytes", channel_index, ch->name.c_str(), text.size());
+    LOG_TRACE("send: channel %zu (%s): %s", channel_index, ch->name.c_str(), text.c_str());
     if (!dispatcher_.send(std::move(p), kPriorityFlood)) {
         LOG_ERROR("send: channel message is too long after encryption and padding (%zu bytes)",
                   text.size());
